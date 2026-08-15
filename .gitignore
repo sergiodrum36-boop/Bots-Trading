@@ -1,0 +1,25 @@
+# Secretos -- nunca deben subirse a ningun repositorio (02_Especificaciones_
+# Tecnicas.md, seccion 7).
+.env
+
+# Bases de datos de persistencia (seccion 9) -- datos locales de cada
+# maquina, nunca se versionan.
+*.sqlite
+*.sqlite3
+
+# Estado del kill switch -- local de cada maquina/ejecucion (risk/kill_switch.py).
+kill_switch_state.json
+
+# Logs rotados (utils/logger.py, todavia no construido).
+logs/
+
+# Entorno virtual y cache de Python.
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Artefactos de editor/SO habituales.
+.vscode/
+.idea/
+.DS_Store

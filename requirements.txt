@@ -1,0 +1,22 @@
+# Conector de datos (Fase 1: Alpaca, acciones/ETFs EE. UU.)
+alpaca-py>=0.33
+python-dotenv>=1.0
+tenacity>=8.2
+
+# Persistencia (persistence/) -- SQLite via SQLAlchemy, dry-run/live separadas.
+# psycopg2-binary es el driver de Postgres, solo necesario si TRADING_BOT_DATABASE_URL
+# apunta a una base remota (Supabase/GitHub Actions, ver persistence/database.py) --
+# instalarlo no molesta si sigues en SQLite local.
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+
+# Panel visual de solo consulta (dashboard/) -- ver dashboard/app.py
+streamlit>=1.61
+
+# Se iran anadiendo aqui las dependencias de los proximos modulos
+# (config/config.yaml + pydantic-settings, etc.) segun
+# 02_Especificaciones_Tecnicas.md, seccion 13.
+
+# Tests
+pytest>=8.0
+pandas>=2.0
