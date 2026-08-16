@@ -90,6 +90,13 @@ def test_app_loads_without_exceptions_with_live_connection(
 def test_app_degrades_gracefully_without_credentials(monkeypatch, tmp_path):
     # Sin APCA_API_KEY_ID/SECRET: el conector no se puede construir, pero el
     # panel debe seguir mostrando el historial (vacio) en vez de romperse.
+    # `monkeypatch.chdir(tmp_path)` NO basta para ocultar un `.env` real del
+    # checkout: `AlpacaConnector` llama a `load_dotenv()` sin ruta explicita,
+    # que busca subiendo desde la ubicacion de connectors/alpaca_connector.py
+    # (no desde el cwd), asi que en un checkout real con `.env` junto a
+    # trading_bot/ lo volveria a rellenar tras el delenv() -- hay que anular
+    # load_dotenv() directamente (visto fallar en la practica: "assert 0 >= 1").
+    monkeypatch.setattr(ac_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
     monkeypatch.chdir(tmp_path)

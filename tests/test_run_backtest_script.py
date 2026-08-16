@@ -33,6 +33,12 @@ def mock_alpaca_clients(monkeypatch):
 
 
 def test_missing_credentials_exits_with_error(monkeypatch, capsys, tmp_path):
+    # Sin esto, en un checkout real con un `.env` de verdad junto a
+    # trading_bot/, `AlpacaConnector.__init__` -> `load_dotenv()` (sin ruta
+    # explicita, busca subiendo desde connectors/alpaca_connector.py, no
+    # desde el cwd) volveria a rellenar las credenciales que delenv() acaba
+    # de borrar -- visto fallar en la practica ("assert 0 == 1").
+    monkeypatch.setattr(ac_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 

@@ -93,6 +93,15 @@ class TestAuthentication:
     def test_missing_credentials_raises_authentication_error(
         self, monkeypatch, mock_clients
     ):
+        # `AlpacaConnector.__init__` llama a `load_dotenv(dotenv_path=None, ...)`
+        # sin ruta explicita -- python-dotenv busca el `.env` real subiendo
+        # desde la ubicacion de connectors/alpaca_connector.py (NO desde el
+        # cwd del test), asi que en un checkout real con un `.env` de verdad
+        # junto a trading_bot/, delenv() por si solo no basta: dotenv lo
+        # volveria a rellenar. Se anula la llamada a load_dotenv() para que
+        # el test sea fiable tanto en un sandbox limpio como en el checkout
+        # real del usuario (visto fallar en la practica: "DID NOT RAISE").
+        monkeypatch.setattr(ac_module, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
         monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 
@@ -102,6 +111,7 @@ class TestAuthentication:
     def test_missing_secret_key_only_raises_authentication_error(
         self, monkeypatch, mock_clients
     ):
+        monkeypatch.setattr(ac_module, "load_dotenv", lambda *args, **kwargs: None)
         monkeypatch.setenv("APCA_API_KEY_ID", "some-key")
         monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 
