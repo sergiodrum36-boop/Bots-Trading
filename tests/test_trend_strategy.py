@@ -49,6 +49,10 @@ class TestTrendStrategyConfig:
         with pytest.raises(ValueError):
             TrendStrategyConfig(rsi_sell_threshold=0)
 
+    def test_atr_period_must_be_positive(self):
+        with pytest.raises(ValueError):
+            TrendStrategyConfig(atr_period=0)
+
 
 class TestEvaluateSignalLogic:
     def setup_method(self):
@@ -140,6 +144,33 @@ class TestGenerateSignals:
         # no tiene suficiente historia, deben ser HOLD explicito.
         assert signals[0].action == SignalAction.HOLD
         assert "calentamiento" in signals[0].reason
+
+    def test_atr_is_nan_during_warmup_and_a_real_number_afterwards(self):
+        config = TrendStrategyConfig(
+            ema_fast=3, ema_slow=5, rsi_period=3, macd_fast=3, macd_slow=6, macd_signal=2, atr_period=3
+        )
+        strategy = TrendStrategy(config)
+
+        closes = [100.0 + i * 0.5 for i in range(15)]
+        bars = [
+            OHLCVBar(
+                symbol="SPY",
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+                open=c,
+                high=c + 1,
+                low=c - 1,
+                close=c,
+                volume=1_000.0,
+            )
+            for i, c in enumerate(closes)
+        ]
+        df = bars_to_dataframe(bars)
+
+        signals = strategy.generate_signals("SPY", df)
+
+        assert pd.isna(signals[0].indicators.atr)
+        assert pd.notna(signals[-1].indicators.atr)
+        assert signals[-1].indicators.atr > 0
 
     def test_signals_length_matches_input_length_on_realistic_series(self):
         config = TrendStrategyConfig(ema_fast=3, ema_slow=5, rsi_period=3, macd_fast=3, macd_slow=6, macd_signal=2)

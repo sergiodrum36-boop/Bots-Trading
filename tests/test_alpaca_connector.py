@@ -25,6 +25,7 @@ from connectors.base_connector import (
     SymbolNotFoundError,
     Timeframe,
 )
+from utils.retry import CircuitBreaker, CircuitState
 
 
 # ----------------------------------------------------------------------
@@ -339,6 +340,115 @@ class TestRetryBehavior:
             connector.get_latest_bar("SPY")
 
         assert mock_clients.data.get_stock_latest_bar.call_count == 1
+
+
+# ----------------------------------------------------------------------
+# Circuit breaker (fallos sostenidos a lo largo de varias llamadas,
+# distinto de los reintentos de UNA llamada que cubre TestRetryBehavior)
+# ----------------------------------------------------------------------
+class _FakeClock:
+    """Reloj controlable a mano, mismo patron que tests/test_retry.py."""
+
+    def __init__(self, start: float = 0.0):
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+class TestCircuitBreakerIntegration:
+    def _make_connector(self, env_credentials, mock_clients, breaker):
+        return AlpacaConnector(
+            paper=True,
+            max_retries=1,  # sin reintentos internos: cada llamada falla a la primera
+            retry_wait_min=0.01,
+            retry_wait_max=0.02,
+            circuit_breaker=breaker,
+        )
+
+    def test_uses_a_default_circuit_breaker_when_none_is_injected(self, connector):
+        assert connector._circuit_breaker.state == CircuitState.CLOSED
+
+    def test_opens_after_consecutive_call_level_failures_and_rejects_without_hitting_api(
+        self, env_credentials, mock_clients
+    ):
+        clock = _FakeClock()
+        breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=60, clock=clock, name="test")
+        connector = self._make_connector(env_credentials, mock_clients, breaker)
+        mock_clients.data.get_stock_latest_bar.side_effect = ConnectionError("red caida")
+
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        assert breaker.state == CircuitState.OPEN
+        assert mock_clients.data.get_stock_latest_bar.call_count == 2
+
+        # Tercera llamada: el circuito ya esta abierto, se rechaza SIN
+        # llegar a invocar al cliente de Alpaca.
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        assert mock_clients.data.get_stock_latest_bar.call_count == 2
+
+    def test_non_retryable_errors_also_count_towards_the_circuit_breaker(
+        self, env_credentials, mock_clients
+    ):
+        # Un error no transitorio (ej. autenticacion) no se reintenta, pero
+        # SIGUE siendo un fallo de la llamada a efectos del circuit breaker.
+        clock = _FakeClock()
+        breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60, clock=clock, name="test")
+        connector = self._make_connector(env_credentials, mock_clients, breaker)
+        mock_clients.data.get_stock_latest_bar.side_effect = ValueError("parametros invalidos")
+
+        with pytest.raises(ConnectorError):
+            connector.get_latest_bar("SPY")
+        assert breaker.state == CircuitState.OPEN
+
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        assert mock_clients.data.get_stock_latest_bar.call_count == 1  # la 2a ni se intento
+
+    def test_successful_call_resets_the_failure_count(self, env_credentials, mock_clients):
+        clock = _FakeClock()
+        breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=60, clock=clock, name="test")
+        connector = self._make_connector(env_credentials, mock_clients, breaker)
+        bar = _make_bar(datetime(2026, 8, 14, tzinfo=timezone.utc), 10, 11, 9, 10.5)
+        mock_clients.data.get_stock_latest_bar.side_effect = [
+            ConnectionError("red caida"),
+            {"SPY": bar},
+        ]
+
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        assert breaker.consecutive_failures == 1
+
+        latest = connector.get_latest_bar("SPY")
+        assert latest.close == 10.5
+        assert breaker.consecutive_failures == 0
+        assert breaker.state == CircuitState.CLOSED
+
+    def test_recovers_after_cooldown_via_half_open(self, env_credentials, mock_clients):
+        clock = _FakeClock()
+        breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60, clock=clock, name="test")
+        connector = self._make_connector(env_credentials, mock_clients, breaker)
+        bar = _make_bar(datetime(2026, 8, 14, tzinfo=timezone.utc), 10, 11, 9, 10.5)
+        mock_clients.data.get_stock_latest_bar.side_effect = [
+            ConnectionError("red caida"),
+            {"SPY": bar},
+        ]
+
+        with pytest.raises(ConnectorUnavailableError):
+            connector.get_latest_bar("SPY")
+        assert breaker.state == CircuitState.OPEN
+
+        clock.advance(60)  # cooldown cumplido -> HALF_OPEN, se permite una llamada de prueba
+        latest = connector.get_latest_bar("SPY")
+
+        assert latest.close == 10.5
+        assert breaker.state == CircuitState.CLOSED
 
 
 # ----------------------------------------------------------------------

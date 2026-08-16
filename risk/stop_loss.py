@@ -17,6 +17,7 @@ DEBAJO del precio de entrada.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -48,11 +49,17 @@ def atr_stop_loss(
     """Stop-loss basado en volatilidad: entry_price - (ATR * multiplier).
 
     `atr` es el valor de ATR (Average True Range) ya calculado sobre el
-    símbolo (ver strategy/indicators.py para el cálculo de indicadores;
-    el ATR en sí no está implementado todavía ahí -- ver nota más abajo).
+    símbolo (ver strategy/indicators.py, función `atr()`).
     """
     if entry_price <= 0:
         raise ValueError("entry_price debe ser positivo")
+    # math.isnan primero: "atr <= 0" con NaN es False (ninguna comparacion
+    # con NaN es verdadera), asi que sin este chequeo explicito un ATR NaN
+    # colaria un stop-loss NaN en vez de fallar aqui -- ver
+    # strategy/trend_strategy.py sobre cuando puede llegar NaN (no deberia,
+    # es una red de seguridad adicional, no el unico guardian).
+    if math.isnan(atr):
+        raise ValueError("atr no puede ser NaN (indicador sin suficiente historia todavia)")
     if atr <= 0:
         raise ValueError("atr debe ser positivo")
     if multiplier <= 0:
@@ -80,9 +87,9 @@ def compute_stop_loss(
 ) -> float:
     """Calcula el stop-loss según el método configurado.
 
-    Nota: strategy/indicators.py todavía no calcula ATR -- si se quiere usar
-    `StopLossMethod.ATR` en producción, hay que añadir ese indicador antes
-    (es una extensión pequeña sobre el patrón ya usado para EMA/RSI/MACD).
+    Con `StopLossMethod.ATR`, quien llame debe pasar el ATR ya calculado
+    para el símbolo (ver strategy/indicators.py, función `atr()`, y
+    core/bot_engine.py que lo toma de `Signal.indicators.atr`).
     """
     if config.method == StopLossMethod.FIXED_PERCENT:
         return fixed_percent_stop_loss(entry_price, config.fixed_percent)

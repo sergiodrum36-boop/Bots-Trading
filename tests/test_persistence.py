@@ -137,6 +137,40 @@ class TestTrades:
         )
         # No debe lanzar excepcion; simplemente no hay nada que actualizar.
 
+    def test_get_expected_open_positions_empty_when_nothing_open(self, store):
+        assert store.get_expected_open_positions() == {}
+
+    def test_get_expected_open_positions_includes_only_open_trades(self, store):
+        store.open_trade(
+            symbol="SPY", side="buy", qty=10.0, entry_price=100.0, entry_time=FIXED_NOW,
+            entry_order_id="o1", stop_loss_price=98.0, reason="r1",
+        )
+        closed_id = store.open_trade(
+            symbol="QQQ", side="buy", qty=5.0, entry_price=200.0, entry_time=FIXED_NOW,
+            entry_order_id="o2", stop_loss_price=195.0, reason="r2",
+        )
+        store.close_trade(
+            closed_id, exit_price=210.0, exit_time=FIXED_NOW, exit_order_id="o3",
+            reason="r", pnl_pct_of_capital=0.01,
+        )
+
+        assert store.get_expected_open_positions() == {"SPY": 10.0}
+
+    def test_get_expected_open_positions_sums_multiple_open_records_per_symbol(self, store):
+        # No deberia pasar en condiciones normales (core/bot_engine.py
+        # nunca abre una segunda posicion mientras ya hay una abierta),
+        # pero la agregacion debe ser robusta si pasara igualmente.
+        store.open_trade(
+            symbol="SPY", side="buy", qty=10.0, entry_price=100.0, entry_time=FIXED_NOW,
+            entry_order_id="o1", stop_loss_price=98.0, reason="r1",
+        )
+        store.open_trade(
+            symbol="SPY", side="buy", qty=5.0, entry_price=101.0, entry_time=FIXED_NOW,
+            entry_order_id="o2", stop_loss_price=99.0, reason="r2",
+        )
+
+        assert store.get_expected_open_positions() == {"SPY": 15.0}
+
     def test_only_the_most_recent_open_trade_is_returned(self, store):
         first_id = store.open_trade(
             symbol="SPY", side="buy", qty=10.0, entry_price=100.0,
@@ -178,6 +212,7 @@ class TestNullTradeStore:
             entry_order_id="o", stop_loss_price=1.0, reason="r",
         ) is None
         assert store.get_open_trade_id("SPY") is None
+        assert store.get_expected_open_positions() is None
         store.close_trade(1, exit_price=1.0, exit_time=FIXED_NOW, exit_order_id="o", reason="r", pnl_pct_of_capital=None)
         store.record_error(message="m", context="c", symbol=None, timestamp=FIXED_NOW)
         # Ninguna llamada anterior debe lanzar excepcion.

@@ -124,7 +124,26 @@ def _run_streamlit(script_path: str, port: int) -> None:
     `main()`). Llama a `stcli.main()`, la misma funcion que ejecuta
     `streamlit run` desde la terminal, simulando `sys.argv` -- funciona
     igual en modo desarrollo y "congelado" porque no depende de invocar un
-    interprete de Python aparte."""
+    interprete de Python aparte.
+
+    IMPORTANTE (modo congelado): este proceso hijo es RELANZADO desde cero
+    por `multiprocessing` (metodo "spawn" en Windows) -- no hereda el
+    `sys.path` en memoria del proceso padre, arranca con el que le da el
+    bootloader de PyInstaller. `dashboard/app.py` importa paquetes propios
+    del proyecto (`config`, `connectors`, `core`, etc, ver build_exe.bat --
+    se empaquetan como datos sueltos con `--add-data`, no via
+    `--collect-all`, porque son namespace packages sin `__init__.py` y
+    PyInstaller no los sabe embeber bien en el PYZ) que solo se encuentran
+    si `sys._MEIPASS` (la carpeta `_internal`, donde quedan esos datos)
+    esta en `sys.path` -- por eso se añade aqui explicitamente antes de
+    arrancar Streamlit; sin esto, `dashboard/app.py` falla con
+    `ModuleNotFoundError: No module named 'config'` (visto en la practica
+    el 2026-08-16) en cuanto Streamlit intenta ejecutarlo."""
+    if _is_frozen():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass and meipass not in sys.path:
+            sys.path.insert(0, meipass)
+
     sys.argv = [
         "streamlit",
         "run",

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from strategy.indicators import (
+    DEFAULT_ATR_PERIOD,
     DEFAULT_EMA_FAST,
     DEFAULT_EMA_SLOW,
     DEFAULT_MACD_FAST,
@@ -36,7 +37,12 @@ from strategy.indicators import (
 )
 from strategy.signals import IndicatorSnapshot, Signal, SignalAction
 
-_INDICATOR_COLUMNS = ["ema_fast", "ema_slow", "rsi", "macd_histogram"]
+# Incluye 'atr' aunque _evaluate() no lo use para decidir BUY/SELL/HOLD:
+# esta lista tambien gobierna el "periodo de calentamiento" (mas abajo), y
+# si el ATR todavia no tiene suficiente historia no debe poder salir una
+# señal BUY -- risk/stop_loss.py con StopLossMethod.ATR necesita un ATR
+# valido (no NaN) para calcular el stop-loss de esa operacion.
+_INDICATOR_COLUMNS = ["ema_fast", "ema_slow", "rsi", "macd_histogram", "atr"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +58,7 @@ class TrendStrategyConfig:
     macd_fast: int = DEFAULT_MACD_FAST
     macd_slow: int = DEFAULT_MACD_SLOW
     macd_signal: int = DEFAULT_MACD_SIGNAL
+    atr_period: int = DEFAULT_ATR_PERIOD
 
     def __post_init__(self) -> None:
         if self.ema_fast <= 0 or self.ema_slow <= 0:
@@ -62,6 +69,8 @@ class TrendStrategyConfig:
             raise ValueError("Debe cumplirse 0 <= rsi_buy_min < rsi_buy_max <= 100")
         if not (0.0 < self.rsi_sell_threshold <= 100.0):
             raise ValueError("rsi_sell_threshold debe estar en (0, 100]")
+        if self.atr_period <= 0:
+            raise ValueError("atr_period debe ser positivo")
 
 
 class TrendStrategy:
@@ -85,6 +94,7 @@ class TrendStrategy:
             macd_fast=self.config.macd_fast,
             macd_slow=self.config.macd_slow,
             macd_signal=self.config.macd_signal,
+            atr_period=self.config.atr_period,
         )
 
     def generate_signals(self, symbol: str, df: pd.DataFrame) -> list[Signal]:
@@ -179,6 +189,7 @@ class TrendStrategy:
                 ema_slow=_safe_float(row.get("ema_slow")),
                 rsi=_safe_float(row.get("rsi")),
                 macd_histogram=_safe_float(row.get("macd_histogram")),
+                atr=_safe_float(row.get("atr")),
             ),
             reason=reason,
         )

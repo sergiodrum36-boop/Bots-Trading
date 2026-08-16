@@ -28,17 +28,41 @@ módulo):
      más segura: evita decidir a partir de un estado local que podría
      haberse quedado desincronizado. El `TradeStore` de `persistence/` es
      SOLO un registro de auditoría de lo que el bot HIZO, nunca una entrada
-     para lo que el bot DEBE hacer. Por el mismo motivo, la comprobación de
-     discrepancia de posiciones de las especificaciones (sección 5.4,
-     `KillSwitch.check_position_discrepancy`) TODAVÍA NO se llama desde
-     aquí -- aunque `persistence/` ya registra qué operaciones abrió el
-     bot y podría alimentar esa comprobación, activarla implica un nuevo
-     camino automático hacia el kill switch (falsos positivos posibles si
-     una posición se abrió antes de tener persistencia, si el registro
-     falla tras un envío exitoso, o si el usuario opera manualmente desde
-     el panel de Alpaca) que merece su propio endurecimiento y pruebas
-     dedicadas antes de activarse, no colarse como efecto secundario de
-     añadir una base de datos.
+     para lo que el bot DEBE hacer.
+
+     COMPROBACIÓN DE DISCREPANCIA (sección 5.4, `KillSwitch.
+     check_position_discrepancy`): SÍ se llama desde aquí, una vez por
+     ciclo, justo después de obtener cuenta/posiciones del bróker y antes
+     de evaluar ningún símbolo (ver `_check_position_discrepancy`).
+     Compara lo que el bot CREE tener abierto según `self._store.
+     get_expected_open_positions()` (su propio registro de auditoría)
+     contra lo que reporta el bróker -- si no coinciden, dispara el kill
+     switch y el ciclo se aborta ENTERO (igual que una pérdida de conexión;
+     ver el punto 4 más abajo), sin evaluar ningún símbolo.
+
+     Dos decisiones deliberadas para acotar los falsos positivos que
+     motivaron dejar esto sin activar en versiones anteriores:
+       - Si `get_expected_open_positions()` devuelve `None` (backend sin
+         registro de auditoría fiable, ej. `NullTradeStore` -- el valor por
+         defecto de `BotEngine`), la comprobación se OMITE por completo.
+         Comparar contra un diccionario vacío por no tener persistencia
+         real dispararía el kill switch en cuanto hubiera cualquier
+         posición abierta -- un falso positivo garantizado, no una
+         protección real.
+       - La comparación se acota a `self._config.symbols` (los símbolos que
+         el bot gestiona) en ambos lados, tanto en lo esperado como en lo
+         real -- para no disparar el kill switch por una posición que el
+         usuario abrió manualmente desde el panel de Alpaca en un símbolo
+         que el bot ni siquiera vigila.
+
+     Dos fuentes de falso positivo que SIGUEN sin mitigar a propósito,
+     porque hacerlo requeriría inventar datos que no existen: una posición
+     de un símbolo vigilado que se abrió antes de tener persistencia
+     activada, o un registro de apertura que falló en guardarse después de
+     un envío exitoso a Alpaca. En ambos casos el resultado es el mismo:
+     el kill switch se dispara (opción segura, coherente con el resto de
+     este módulo) y requiere revisión manual + `reset()` explícito -- ver
+     el docstring de `KillSwitch.check_position_discrepancy` y `reset()`.
 
   3. IDEMPOTENCIA DIARIA: la clave de idempotencia de cada orden es
      determinista a partir de símbolo + fecha (UTC) + lado
@@ -73,10 +97,13 @@ el cierre de cada operación, y cualquier error relevante. Es auditoría
 pura -- ver el punto 2 más arriba sobre por qué nunca se usa para decidir.
 
 Lo que este módulo NO hace todavía:
-  - No envía notificaciones (notifications/, todavía no construido).
-  - No implementa rate limiting local ni circuit breaker explícitos
-    (sección 8) -- de momento se apoya en los reintentos acotados que ya
-    tiene `connectors/alpaca_connector.py`.
+  - No implementa rate limiting local propio (sección 8) -- se apoya en
+    los reintentos acotados y el circuit breaker que ya tiene
+    `connectors/alpaca_connector.py` (ver el docstring de ese módulo:
+    protegen fallos transitorios y fallos sostenidos respectivamente,
+    ambos por debajo de esta capa, de forma transparente para
+    `BotEngine` -- aquí solo se ven como `ConnectorError`/
+    `ConnectorUnavailableError`).
 """
 
 from __future__ import annotations
@@ -110,7 +137,7 @@ from risk.position_sizing import (
     DEFAULT_RISK_PCT,
     calculate_position_size,
 )
-from risk.stop_loss import StopLossConfig, compute_stop_loss
+from risk.stop_loss import StopLossConfig, StopLossMethod, compute_stop_loss
 from strategy.indicators import bars_to_dataframe
 from strategy.signals import Signal, SignalAction
 from strategy.trend_strategy import TrendStrategy, TrendStrategyConfig
@@ -250,6 +277,10 @@ class BotEngine:
             timestamp=started_at,
         )
 
+        discrepancy_abort = self._check_position_discrepancy(open_positions, started_at)
+        if discrepancy_abort is not None:
+            return discrepancy_abort
+
         results: list[SymbolCycleResult] = []
         for symbol in self._config.symbols:
             try:
@@ -279,6 +310,53 @@ class BotEngine:
             aborted=False,
             abort_reason=None,
             symbol_results=tuple(results),
+        )
+
+    def _check_position_discrepancy(
+        self, open_positions: dict[str, Position], started_at: datetime
+    ) -> CycleResult | None:
+        """Compara lo que el bot cree tener abierto (`self._store.
+        get_expected_open_positions()`) contra lo que reporta el bróker,
+        acotado a `self._config.symbols` -- ver el punto 2 del docstring
+        del módulo para el razonamiento completo. Devuelve un `CycleResult`
+        de aborto si hay discrepancia (kill switch ya disparado dentro de
+        `KillSwitch.check_position_discrepancy`), o `None` si todo sigue
+        normal (coincide, o no hay auditoría fiable con la que comparar).
+        """
+        expected = self._store.get_expected_open_positions()
+        if expected is None:
+            return None
+
+        tracked_symbols = set(self._config.symbols)
+        expected_tracked = {
+            symbol: qty for symbol, qty in expected.items() if symbol in tracked_symbols and qty != 0
+        }
+        actual_tracked = {
+            symbol: position.qty
+            for symbol, position in open_positions.items()
+            if symbol in tracked_symbols and position.qty != 0
+        }
+
+        if not self._kill_switch.check_position_discrepancy(expected_tracked, actual_tracked):
+            return None
+
+        reason = (
+            "discrepancia entre las posiciones que el bot esperaba tener "
+            f"({expected_tracked}) y las que reporta el broker "
+            f"({actual_tracked}); kill switch activado, ciclo abortado sin "
+            f"evaluar ningun simbolo"
+        )
+        logger.error(reason)
+        self._store.record_error(
+            message=reason, context="discrepancia posiciones", symbol=None, timestamp=started_at
+        )
+        return CycleResult(
+            started_at=started_at,
+            market_open=True,
+            kill_switch_active=True,
+            aborted=True,
+            abort_reason=reason,
+            symbol_results=(),
         )
 
     def _abort_for_connection_failure(self, started_at: datetime, reason: str) -> CycleResult:
@@ -356,7 +434,13 @@ class BotEngine:
             )
 
         stop_loss_price = compute_stop_loss(
-            self._config.stop_loss_config, entry_price=signal.price
+            self._config.stop_loss_config,
+            entry_price=signal.price,
+            atr=(
+                signal.indicators.atr
+                if self._config.stop_loss_config.method == StopLossMethod.ATR
+                else None
+            ),
         )
         sizing = calculate_position_size(
             capital=account.equity,

@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from connectors.base_connector import OHLCVBar
-from strategy.indicators import add_indicators, bars_to_dataframe, ema, macd, rsi
+from strategy.indicators import add_indicators, atr, bars_to_dataframe, ema, macd, rsi
 
 
 def _make_bars(symbol: str, closes: list[float]) -> list[OHLCVBar]:
@@ -72,6 +72,35 @@ class TestMacd:
             macd(pd.Series([1.0, 2.0, 3.0]), fast=26, slow=12)
 
 
+class TestAtr:
+    def test_atr_converges_to_the_constant_true_range(self):
+        # _make_bars usa high=c+1, low=c-1 (rango de 2) y aqui el cierre
+        # sube de 1 en 1 -- con ese salto, |high-cierre_anterior| tambien
+        # da 2 (ver strategy/indicators.py), asi que el ATR converge a 2.0.
+        bars = _make_bars("SPY", [100.0 + i for i in range(30)])
+        df = bars_to_dataframe(bars)
+        result = atr(df, period=10)
+        assert result.iloc[-1] == pytest.approx(2.0)
+
+    def test_atr_before_min_periods_is_nan(self):
+        bars = _make_bars("SPY", [100.0 + i for i in range(30)])
+        df = bars_to_dataframe(bars)
+        result = atr(df, period=10)
+        assert result.iloc[0:9].isna().all()
+        assert pd.notna(result.iloc[9])
+
+    def test_atr_invalid_period_raises(self):
+        bars = _make_bars("SPY", [100.0, 101.0, 102.0])
+        df = bars_to_dataframe(bars)
+        with pytest.raises(ValueError):
+            atr(df, period=0)
+
+    def test_atr_missing_high_low_columns_raises(self):
+        df = pd.DataFrame({"close": [100.0, 101.0, 102.0]})
+        with pytest.raises(ValueError):
+            atr(df)
+
+
 class TestBarsToDataframe:
     def test_empty_list_returns_empty_dataframe_with_expected_columns(self):
         df = bars_to_dataframe([])
@@ -91,8 +120,8 @@ class TestAddIndicators:
     def test_adds_expected_columns(self):
         bars = _make_bars("SPY", [100.0 + i for i in range(60)])
         df = bars_to_dataframe(bars)
-        enriched = add_indicators(df, ema_fast=5, ema_slow=10, rsi_period=5)
-        for col in ["ema_fast", "ema_slow", "rsi", "macd", "macd_signal", "macd_histogram"]:
+        enriched = add_indicators(df, ema_fast=5, ema_slow=10, rsi_period=5, atr_period=5)
+        for col in ["ema_fast", "ema_slow", "rsi", "macd", "macd_signal", "macd_histogram", "atr"]:
             assert col in enriched.columns
 
     def test_missing_close_column_raises(self):

@@ -14,6 +14,7 @@ lista para volcarse ahí sin cambios).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -27,12 +28,21 @@ class SignalAction(str, Enum):
 
 @dataclass(frozen=True)
 class IndicatorSnapshot:
-    """Valores de los indicadores en el momento de generar la señal."""
+    """Valores de los indicadores en el momento de generar la señal.
+
+    `atr` tiene un valor por defecto (NaN) porque se añadió después que el
+    resto de campos -- así el código y los tests existentes que construyen
+    `IndicatorSnapshot` sin ATR (de antes de que existiera) siguen
+    funcionando sin cambios. NaN es intencional, no 0.0: 0.0 parecería un
+    ATR real (volatilidad nula) en vez de "no disponible", y
+    `risk/stop_loss.py` distingue explícitamente ambos casos.
+    """
 
     ema_fast: float
     ema_slow: float
     rsi: float
     macd_histogram: float
+    atr: float = math.nan
 
 
 @dataclass(frozen=True)

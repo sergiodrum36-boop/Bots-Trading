@@ -30,7 +30,7 @@ from core.bot_engine import BotEngine, BotEngineConfig
 from execution.order_manager import OrderManager, make_client_order_id
 from persistence.store import TradeStore
 from risk.kill_switch import KillSwitch, KillSwitchConfig
-from risk.stop_loss import StopLossConfig
+from risk.stop_loss import StopLossConfig, StopLossMethod
 from strategy.signals import IndicatorSnapshot, Signal, SignalAction
 
 
@@ -143,13 +143,15 @@ def _bar(symbol="SPY", price=100.0) -> OHLCVBar:
     )
 
 
-def _signal(symbol, action, price=100.0, reason="motivo de prueba") -> Signal:
+def _signal(symbol, action, price=100.0, reason="motivo de prueba", atr=float("nan")) -> Signal:
     return Signal(
         symbol=symbol,
         timestamp=FIXED_NOW,
         action=action,
         price=price,
-        indicators=IndicatorSnapshot(ema_fast=1.0, ema_slow=1.0, rsi=50.0, macd_histogram=0.1),
+        indicators=IndicatorSnapshot(
+            ema_fast=1.0, ema_slow=1.0, rsi=50.0, macd_histogram=0.1, atr=atr
+        ),
         reason=reason,
     )
 
@@ -201,6 +203,10 @@ class FakeTradeStore(TradeStore):
         self.errors: list[dict] = []
         self._next_id = 1
         self._open_trade_id_by_symbol: dict[str, int] = {}
+        # None (por defecto) = mismo comportamiento que NullTradeStore: sin
+        # auditoria fiable, la comprobacion de discrepancia se omite. Los
+        # tests que la quieran ejercitar asignan un dict explicitamente.
+        self.expected_open_positions: dict[str, float] | None = None
 
     def record_signal(self, signal, executed):
         self.signals.append((signal, executed))
@@ -220,6 +226,9 @@ class FakeTradeStore(TradeStore):
     def get_open_trade_id(self, symbol):
         return self._open_trade_id_by_symbol.get(symbol)
 
+    def get_expected_open_positions(self):
+        return self.expected_open_positions
+
     def close_trade(self, trade_id, **kwargs):
         self.closed_trades.append((trade_id, kwargs))
         for symbol, tid in list(self._open_trade_id_by_symbol.items()):
@@ -230,11 +239,15 @@ class FakeTradeStore(TradeStore):
         self.errors.append(kwargs)
 
 
-def _make_engine(connector, kill_switch, strategy, symbols=("SPY",), store=None) -> BotEngine:
+def _make_engine(
+    connector, kill_switch, strategy, symbols=("SPY",), store=None, stop_loss_config=None
+) -> BotEngine:
     order_manager = OrderManager(
         connector=connector, kill_switch=kill_switch, fill_poll_attempts=2, fill_poll_wait_seconds=0
     )
-    config = BotEngineConfig(symbols=symbols, stop_loss_config=StopLossConfig())
+    config = BotEngineConfig(
+        symbols=symbols, stop_loss_config=stop_loss_config or StopLossConfig()
+    )
     return BotEngine(
         connector=connector,
         strategy=strategy,
@@ -338,6 +351,116 @@ class TestCycleGates:
 
 
 # ----------------------------------------------------------------------
+# Comprobacion de discrepancia de posiciones (KillSwitch.
+# check_position_discrepancy, seccion 5.4) -- ver el punto 2 del docstring
+# de core/bot_engine.py para el razonamiento completo de por que se acota
+# a self._config.symbols y por que None se trata como "omitir".
+# ----------------------------------------------------------------------
+class TestPositionDiscrepancy:
+    def test_null_trade_store_skips_the_check_entirely(self, connector, kill_switch):
+        # store=None -> NullTradeStore -> get_expected_open_positions()
+        # devuelve None -> se omite la comprobacion, ciclo normal.
+        connector.positions["SPY"] = Position(
+            symbol="SPY", qty=10.0, avg_entry_price=90.0, market_value=1000.0, unrealized_pl=100.0
+        )
+        connector.bars_by_symbol["SPY"] = [_bar("SPY")]
+        strategy = FakeStrategy()
+        engine = _make_engine(connector, kill_switch, strategy)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is False
+        assert kill_switch.is_active() is False
+        assert strategy.calls == ["SPY"]
+
+    def test_matching_expected_and_actual_does_not_trigger_kill_switch(self, connector, kill_switch):
+        connector.positions["SPY"] = Position(
+            symbol="SPY", qty=10.0, avg_entry_price=90.0, market_value=1000.0, unrealized_pl=100.0
+        )
+        connector.bars_by_symbol["SPY"] = [_bar("SPY")]
+        strategy = FakeStrategy()
+        store = FakeTradeStore()
+        store.expected_open_positions = {"SPY": 10.0}
+        engine = _make_engine(connector, kill_switch, strategy, store=store)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is False
+        assert kill_switch.is_active() is False
+        assert strategy.calls == ["SPY"]
+
+    def test_mismatch_triggers_kill_switch_and_aborts_without_evaluating_symbols(
+        self, connector, kill_switch
+    ):
+        connector.positions["SPY"] = Position(
+            symbol="SPY", qty=10.0, avg_entry_price=90.0, market_value=1000.0, unrealized_pl=100.0
+        )
+        connector.bars_by_symbol["SPY"] = [_bar("SPY")]
+        strategy = FakeStrategy()
+        store = FakeTradeStore()
+        store.expected_open_positions = {"SPY": 5.0}  # el broker reporta 10, no 5
+        engine = _make_engine(connector, kill_switch, strategy, store=store)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is True
+        assert "discrepancia" in result.abort_reason
+        assert kill_switch.is_active() is True
+        assert strategy.calls == []  # ningun simbolo se llega a evaluar
+        assert len(store.errors) == 1
+        assert store.errors[0]["context"] == "discrepancia posiciones"
+
+    def test_missing_broker_position_the_bot_believes_open_triggers_kill_switch(
+        self, connector, kill_switch
+    ):
+        # El bot cree tener SPY abierto pero el broker no reporta nada.
+        strategy = FakeStrategy()
+        store = FakeTradeStore()
+        store.expected_open_positions = {"SPY": 10.0}
+        engine = _make_engine(connector, kill_switch, strategy, store=store)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is True
+        assert kill_switch.is_active() is True
+
+    def test_discrepancy_on_an_untracked_symbol_is_ignored(self, connector, kill_switch):
+        # Simbolo que el bot NO gestiona (self._config.symbols=("SPY",)):
+        # una posicion manual del usuario en otro simbolo no debe disparar
+        # el kill switch.
+        connector.positions["OTHER"] = Position(
+            symbol="OTHER", qty=3.0, avg_entry_price=50.0, market_value=150.0, unrealized_pl=0.0
+        )
+        connector.bars_by_symbol["SPY"] = [_bar("SPY")]
+        strategy = FakeStrategy()
+        store = FakeTradeStore()
+        store.expected_open_positions = {}  # el bot no cree tener nada abierto
+        engine = _make_engine(connector, kill_switch, strategy, symbols=("SPY",), store=store)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is False
+        assert kill_switch.is_active() is False
+        assert strategy.calls == ["SPY"]
+
+    def test_stale_expected_entry_for_a_symbol_no_longer_tracked_is_ignored(
+        self, connector, kill_switch
+    ):
+        # Un simbolo que se quito de config.symbols pero sigue en el
+        # registro de auditoria como "abierto" no debe disparar nada.
+        connector.bars_by_symbol["SPY"] = [_bar("SPY")]
+        strategy = FakeStrategy()
+        store = FakeTradeStore()
+        store.expected_open_positions = {"RETIRED": 20.0}
+        engine = _make_engine(connector, kill_switch, strategy, symbols=("SPY",), store=store)
+
+        result = engine.run_cycle()
+
+        assert result.aborted is False
+        assert kill_switch.is_active() is False
+
+
+# ----------------------------------------------------------------------
 # Simbolo individual: no negociable / sin datos / HOLD
 # ----------------------------------------------------------------------
 class TestSymbolPreconditions:
@@ -424,6 +547,47 @@ class TestBuySignal:
 
         assert result.symbol_results[0].executed is False
         assert "0 acciones" in result.symbol_results[0].reason
+        assert connector.submitted == []
+
+    def test_atr_stop_loss_method_uses_the_atr_from_the_signal(self, connector, kill_switch):
+        connector.bars_by_symbol["SPY"] = [_bar("SPY", price=100.0)]
+        strategy = FakeStrategy(
+            {"SPY": [_signal("SPY", SignalAction.BUY, price=100.0, atr=2.0)]}
+        )
+        connector.queue_get_order_response(None)
+        connector.set_submit_result(_order(status=OrderStatus.FILLED, symbol="SPY", qty=200.0))
+        stop_loss_config = StopLossConfig(method=StopLossMethod.ATR, atr_multiplier=2.0)
+
+        engine = _make_engine(connector, kill_switch, strategy, stop_loss_config=stop_loss_config)
+        result = engine.run_cycle()
+
+        # stop = 100 - (2.0 * 2.0) = 96.0, distancia=4.0, riesgo 1% de
+        # 100000=1000 -> 250 acciones por riesgo, limitado al 20% del
+        # capital / 100 = 200.
+        symbol_result = result.symbol_results[0]
+        assert symbol_result.executed is True
+        assert connector.submitted[0]["qty"] == 200.0
+
+    def test_atr_stop_loss_method_with_nan_atr_is_isolated_as_a_symbol_error(
+        self, connector, kill_switch
+    ):
+        # Defensa en profundidad: si por lo que sea el ATR de la señal
+        # sigue en NaN (no debería pasar -- trend_strategy.py fuerza HOLD
+        # mientras el ATR no tenga historia suficiente), esto NUNCA debe
+        # tumbar el ciclo entero, solo ese simbolo (ver el aislamiento por
+        # simbolo que ya prueba TestSymbolIsolation).
+        connector.bars_by_symbol["SPY"] = [_bar("SPY", price=100.0)]
+        strategy = FakeStrategy(
+            {"SPY": [_signal("SPY", SignalAction.BUY, price=100.0, atr=float("nan"))]}
+        )
+        stop_loss_config = StopLossConfig(method=StopLossMethod.ATR, atr_multiplier=2.0)
+
+        engine = _make_engine(connector, kill_switch, strategy, stop_loss_config=stop_loss_config)
+        result = engine.run_cycle()
+
+        symbol_result = result.symbol_results[0]
+        assert symbol_result.executed is False
+        assert symbol_result.error is not None
         assert connector.submitted == []
 
 

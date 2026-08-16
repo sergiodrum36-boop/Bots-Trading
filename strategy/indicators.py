@@ -19,6 +19,7 @@ DEFAULT_RSI_PERIOD = 14
 DEFAULT_MACD_FAST = 12
 DEFAULT_MACD_SLOW = 26
 DEFAULT_MACD_SIGNAL = 9
+DEFAULT_ATR_PERIOD = 14
 
 _BAR_COLUMNS = ["symbol", "open", "high", "low", "close", "volume", "trade_count", "vwap"]
 
@@ -104,6 +105,38 @@ def macd(
     )
 
 
+def atr(df: pd.DataFrame, period: int = DEFAULT_ATR_PERIOD) -> pd.Series:
+    """Average True Range (ATR): mide volatilidad reciente, se usa como
+    base del stop-loss adaptativo (`risk/stop_loss.py`,
+    `StopLossMethod.ATR`) en vez de un porcentaje fijo.
+
+    True Range de cada vela = el mayor de: (high - low), |high - cierre
+    anterior|, |low - cierre anterior|. El ATR es el suavizado de Wilder
+    de esa serie (EWM con alpha = 1/period), el mismo estilo que ya usa
+    `rsi()` en este módulo. Requiere las columnas 'high', 'low' y 'close'.
+    """
+    if period <= 0:
+        raise ValueError("El periodo del ATR debe ser mayor que 0")
+    for column in ("high", "low", "close"):
+        if column not in df.columns:
+            raise ValueError(f"El DataFrame debe tener una columna '{column}' para el ATR")
+
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1, skipna=True)
+    # La primera vela no tiene cierre anterior -- max(axis=1, skipna=True)
+    # ya ignora los NaN de las otras dos columnas y deja high-low, sin
+    # necesidad de un caso especial aparte.
+
+    return true_range.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
 def add_indicators(
     df: pd.DataFrame,
     ema_fast: int = DEFAULT_EMA_FAST,
@@ -112,11 +145,13 @@ def add_indicators(
     macd_fast: int = DEFAULT_MACD_FAST,
     macd_slow: int = DEFAULT_MACD_SLOW,
     macd_signal: int = DEFAULT_MACD_SIGNAL,
+    atr_period: int = DEFAULT_ATR_PERIOD,
 ) -> pd.DataFrame:
     """Añade columnas de indicadores (ema_fast, ema_slow, rsi, macd,
-    macd_signal, macd_histogram) a un DataFrame OHLCV de UN SOLO símbolo,
-    ordenado cronológicamente. No mezclar símbolos: llamar una vez por
-    símbolo (ver `bars_to_dataframe` para separar por símbolo primero).
+    macd_signal, macd_histogram, atr) a un DataFrame OHLCV de UN SOLO
+    símbolo, ordenado cronológicamente. No mezclar símbolos: llamar una
+    vez por símbolo (ver `bars_to_dataframe` para separar por símbolo
+    primero).
     """
     if "close" not in df.columns:
         raise ValueError("El DataFrame debe tener una columna 'close'")
@@ -131,4 +166,5 @@ def add_indicators(
     out["ema_slow"] = ema(out["close"], ema_slow)
     out["rsi"] = rsi(out["close"], rsi_period)
     out = out.join(macd(out["close"], macd_fast, macd_slow, macd_signal))
+    out["atr"] = atr(out, atr_period)
     return out

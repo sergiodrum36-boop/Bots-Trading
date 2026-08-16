@@ -18,6 +18,25 @@ modulo, 2026-08-15):
   - Feed de datos: IEX por defecto (gratuito, disponible en cuentas de
     paper trading; ver 00_INDICE.md y la documentacion oficial de Alpaca).
 
+Resiliencia (02_Especificaciones_Tecnicas.md, seccion 8): dos mecanismos
+distintos y complementarios, ambos dentro de `_call_with_retry` (el punto
+unico por el que pasa cualquier llamada a la API de Alpaca):
+  - Reintentos acotados (tenacity, como antes): absorben un fallo
+    TRANSITORIO dentro de UNA llamada (red, timeout, 5xx, 429). Backoff
+    exponencial acotado, nunca reintento indefinido.
+  - `CircuitBreaker` (utils/retry.py, `self._circuit_breaker`): protege
+    contra fallos SOSTENIDOS a lo largo de VARIAS llamadas, incluso ya con
+    reintentos agotados en cada una -- si `circuit_breaker_failure_
+    threshold` llamadas seguidas fallan, deja de intentarlo durante
+    `circuit_breaker_cooldown_seconds` (rechaza localmente con
+    `CircuitBreakerOpenError`, reclasificado a `ConnectorUnavailableError`,
+    sin golpear la API) en vez de seguir goteando peticiones contra un
+    servicio caido. Una llamada con exito reinicia el contador. Es
+    deliberadamente un mecanismo EN MEMORIA, sin persistir a disco (a
+    diferencia del kill switch): no hace falta que sobreviva a un reinicio
+    del proceso, solo evitar seguir golpeando la API DENTRO del mismo
+    proceso mientras dura la caida.
+
 Seguridad: las credenciales SIEMPRE se leen de variables de entorno
 (`APCA_API_KEY_ID`, `APCA_API_SECRET_KEY`) via `.env` (python-dotenv).
 Nunca se aceptan como literales en el codigo ni se loguean.
@@ -63,6 +82,7 @@ from connectors.base_connector import (
     SymbolNotFoundError,
     Timeframe,
 )
+from utils.retry import CircuitBreaker, CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +94,9 @@ DEFAULT_SYMBOLS: tuple[str, ...] = ("SPY", "QQQ", "AAPL", "MSFT")
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_WAIT_MIN = 1.0  # segundos
 DEFAULT_RETRY_WAIT_MAX = 10.0  # segundos
+
+DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
+DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 60.0
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -153,6 +176,14 @@ class AlpacaConnector(BrokerConnector):
             indefinido: como mucho `max_retries` intentos, con backoff
             exponencial acotado entre `retry_wait_min` y `retry_wait_max`
             segundos.
+        circuit_breaker: instancia de `utils.retry.CircuitBreaker` a usar.
+            Si no se indica, se crea una con `circuit_breaker_failure_
+            threshold`/`circuit_breaker_cooldown_seconds` (o sus valores
+            por defecto). Permite inyectar una instancia propia en tests
+            (reloj falso) o compartir una entre varios conectores.
+        circuit_breaker_failure_threshold / circuit_breaker_cooldown_seconds:
+            solo se usan para construir el `CircuitBreaker` por defecto;
+            se ignoran si se pasa `circuit_breaker` explicitamente.
         env_file: ruta opcional a un archivo .env distinto del por defecto
             (util en tests). Si no se indica, se usa el comportamiento
             estandar de python-dotenv (busca `.env` en el directorio actual).
@@ -166,6 +197,9 @@ class AlpacaConnector(BrokerConnector):
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_wait_min: float = DEFAULT_RETRY_WAIT_MIN,
         retry_wait_max: float = DEFAULT_RETRY_WAIT_MAX,
+        circuit_breaker: CircuitBreaker | None = None,
+        circuit_breaker_failure_threshold: int = DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        circuit_breaker_cooldown_seconds: float = DEFAULT_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
         env_file: str | None = None,
     ) -> None:
         load_dotenv(dotenv_path=env_file, override=False)
@@ -188,22 +222,32 @@ class AlpacaConnector(BrokerConnector):
         self._max_retries = max(1, max_retries)
         self._retry_wait_min = retry_wait_min
         self._retry_wait_max = retry_wait_max
+        self._circuit_breaker = circuit_breaker or CircuitBreaker(
+            failure_threshold=circuit_breaker_failure_threshold,
+            cooldown_seconds=circuit_breaker_cooldown_seconds,
+            name="alpaca",
+        )
 
         self._trading_client = TradingClient(api_key, secret_key, paper=paper)
         self._data_client = StockHistoricalDataClient(api_key, secret_key)
 
         logger.info(
-            "AlpacaConnector inicializado (paper=%s, feed=%s, max_retries=%s)",
+            "AlpacaConnector inicializado (paper=%s, feed=%s, max_retries=%s, "
+            "circuit_breaker_failure_threshold=%s, circuit_breaker_cooldown_seconds=%s)",
             paper,
             self._feed,
             self._max_retries,
+            self._circuit_breaker.failure_threshold,
+            self._circuit_breaker.cooldown_seconds,
         )
 
     # ------------------------------------------------------------------
     # Infraestructura de reintentos / logging
     # ------------------------------------------------------------------
     def _call_with_retry(self, description: str, func, *args, **kwargs):
-        """Ejecuta `func(*args, **kwargs)` con reintentos acotados (via tenacity).
+        """Ejecuta `func(*args, **kwargs)` con reintentos acotados (via
+        tenacity) y protegido por el circuit breaker de la instancia (ver
+        docstring del modulo, seccion "Resiliencia").
 
         - Reintenta solo errores transitorios (`_is_retryable_error`): red,
           timeouts, 5xx y rate limit (429).
@@ -215,6 +259,13 @@ class AlpacaConnector(BrokerConnector):
           excepcion tal cual en vez de envolverla en un `RetryError` opaco.
         - Cada intento fallido se registra en el log (WARNING) antes de
           reintentar; el fallo definitivo se registra como ERROR.
+        - Toda la secuencia de reintentos (una llamada "logica") pasa por
+          `self._circuit_breaker.call(...)`: si el circuito ya esta
+          abierto (demasiadas llamadas seguidas fallidas), esta llamada se
+          rechaza SIN intentar nada (ni siquiera el primer intento) --
+          se reclasifica igual que agotar los reintentos
+          (`ConnectorUnavailableError`), para que quien llama (`core/
+          bot_engine.py`) no tenga que distinguir entre ambos casos.
         """
         attempt_counter = {"n": 0}
 
@@ -242,8 +293,21 @@ class AlpacaConnector(BrokerConnector):
             before_sleep=_log_before_sleep,
         )
 
-        try:
+        def _run_with_retries():
             return retryer(func, *args, **kwargs)
+
+        try:
+            return self._circuit_breaker.call(_run_with_retries)
+        except CircuitBreakerOpenError as exc:
+            logger.error(
+                "%s: circuit breaker '%s' abierto tras %s fallo(s) seguido(s); "
+                "llamada rechazada sin golpear la API: %s",
+                description,
+                self._circuit_breaker.name,
+                self._circuit_breaker.consecutive_failures,
+                exc,
+            )
+            raise ConnectorUnavailableError(f"{description}: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - reclasificado a continuacion
             if not _is_retryable_error(exc):
                 logger.error(

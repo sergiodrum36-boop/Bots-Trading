@@ -26,8 +26,9 @@ Lo que este módulo NO hace:
     como gate antes de ABRIR una posición nueva.
   - No reconcilia el estado completo de todas las posiciones contra el
     broker de forma periódica -- eso es responsabilidad de
-    core/bot_engine.py (el orquestador, todavía no construido), que debe
-    llamar a `KillSwitch.check_position_discrepancy()` con regularidad.
+    core/bot_engine.py (el orquestador), que llama a
+    `KillSwitch.check_position_discrepancy()` una vez por ciclo, antes de
+    evaluar ningún símbolo (ver `BotEngine._check_position_discrepancy`).
   - No registra el resultado (P&L) en el kill switch -- `record_trade_result`
     se llama cuando se conoce el resultado final de una posición CERRADA
     (responsabilidad de quien orquesta, que es quien sabe a qué precio se

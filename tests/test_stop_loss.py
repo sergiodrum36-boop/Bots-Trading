@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from risk.stop_loss import (
@@ -50,6 +52,13 @@ class TestAtrStopLoss:
         with pytest.raises(ValueError):
             atr_stop_loss(10.0, atr=6.0, multiplier=2.0)
 
+    def test_nan_atr_raises_instead_of_a_silent_nan_stop(self):
+        # "nan <= 0" es False en Python -- sin un chequeo explicito de NaN,
+        # este caso se colaria por las validaciones normales (ver el
+        # comentario en risk/stop_loss.py, atr_stop_loss).
+        with pytest.raises(ValueError):
+            atr_stop_loss(100.0, atr=math.nan, multiplier=2.0)
+
 
 class TestComputeStopLoss:
     def test_dispatches_to_fixed_percent(self):
@@ -64,3 +73,10 @@ class TestComputeStopLoss:
         config = StopLossConfig(method=StopLossMethod.ATR)
         with pytest.raises(ValueError):
             compute_stop_loss(config, entry_price=100.0)
+
+    def test_atr_method_with_nan_atr_value_raises(self):
+        # Caso real: Signal.indicators.atr sigue en NaN (periodo de
+        # calentamiento) pero por algun motivo se llama de todos modos.
+        config = StopLossConfig(method=StopLossMethod.ATR)
+        with pytest.raises(ValueError):
+            compute_stop_loss(config, entry_price=100.0, atr=math.nan)

@@ -1,0 +1,77 @@
+# config/config.yaml
+#
+# Parametros de riesgo, simbolos, timeframe y estrategia del bot
+# (02_Especificaciones_Tecnicas.md, secciones 4, 5 y 13;
+# 03_Estructura_Proyecto_Python.md). Cargado y validado por
+# config/settings.py (pydantic-settings) -- ver ahi que pasa si este
+# archivo falta o tiene un valor invalido.
+#
+# IMPORTANTE: este archivo NUNCA debe contener secretos (API keys,
+# contrasenas, connection strings). Eso vive solo en .env (ver
+# .env.example) y nunca se sube a git (ver .gitignore). Este archivo SI
+# se versiona en git -- es intencional, forma parte del comportamiento
+# del bot, no de sus credenciales.
+#
+# Los valores de aqui son los mismos que ya traia el proyecto por
+# defecto en cada modulo -- cambialos aqui si quieres ajustar el
+# comportamiento del bot sin tocar codigo. Despues de editar este
+# archivo no hace falta reinstalar nada: se relee cada vez que arranca
+# scripts/run_paper_trading.py, scripts/run_backtest.py o el panel
+# visual (dashboard/app.py).
+
+# Simbolos que evalua el bot en cada ciclo de paper trading o backtest.
+# Se puede sobreescribir puntualmente con --symbols en los scripts sin
+# tocar este archivo.
+symbols:
+  - SPY
+  - QQQ
+  - AAPL
+  - MSFT
+
+# Timeframe de las velas: "1Min", "5Min", "15Min", "1Hour" o "1Day".
+# La estrategia de la Fase 1 esta pensada para velas diarias (ver
+# 02_Especificaciones_Tecnicas.md, seccion 4) -- bajar de aqui a
+# intradia sin mas no esta probado todavia.
+timeframe: "1Day"
+
+# Numero de velas historicas que se piden en cada ciclo -- debe dar
+# margen suficiente para el "calentamiento" de la EMA lenta/RSI/MACD
+# (ver core/bot_engine.py, DEFAULT_BARS_LIMIT).
+bars_limit: 100
+
+# Estrategia de tendencia (strategy/trend_strategy.py, seccion 4 de las
+# especificaciones).
+strategy:
+  ema_fast: 20
+  ema_slow: 50
+  rsi_period: 14
+  rsi_buy_min: 40.0
+  rsi_buy_max: 70.0
+  rsi_sell_threshold: 80.0
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  atr_period: 14           # solo importa si stop_loss.method: atr, mas abajo
+
+# Gestion de riesgo -- tamano de posicion (risk/position_sizing.py,
+# secciones 5.1 y 5.3 de las especificaciones).
+risk:
+  risk_pct: 0.01           # 1% del capital total arriesgado por operacion
+  max_position_pct: 0.20   # nunca mas del 20% del capital en una sola posicion
+
+# Stop-loss (risk/stop_loss.py, seccion 5.2 de las especificaciones).
+stop_loss:
+  method: fixed_percent    # fixed_percent | atr
+  fixed_percent: 0.02      # 2% por debajo del precio de entrada
+  atr_multiplier: 2.0      # solo se usa si method: atr -- stop-loss =
+                            # precio de entrada - (ATR * atr_multiplier),
+                            # el ATR se recalcula cada ciclo (ver
+                            # strategy/indicators.py, atr_period arriba)
+
+# Kill switch -- parada de emergencia global (risk/kill_switch.py,
+# secciones 5.4 y 5.5 de las especificaciones).
+kill_switch:
+  max_daily_loss_pct: 0.05          # 5% del capital total en un dia
+  max_consecutive_losses: 3
+  max_connection_loss_minutes: 15.0
+  max_trades_per_day: 10

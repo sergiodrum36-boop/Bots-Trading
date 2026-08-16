@@ -64,6 +64,26 @@ class TradeStore(ABC):
         símbolo, o `None` si no hay ninguna abierta registrada."""
 
     @abstractmethod
+    def get_expected_open_positions(self) -> dict[str, float] | None:
+        """Posiciones que el bot CREE tener abiertas, segun su propio
+        registro de auditoria: {simbolo: cantidad}, sumando si hubiera mas
+        de un registro "open" para el mismo simbolo (no deberia pasar en
+        condiciones normales, ver el punto 2 del docstring de
+        core/bot_engine.py sobre por que solo se abre una posicion por
+        simbolo a la vez).
+
+        Devuelve `None` -- en vez de un diccionario vacio -- cuando este
+        backend NO tiene ningun registro de auditoria fiable con el que
+        comparar (ej. `NullTradeStore`, sin base de datos configurada).
+        Esta distincion es la que usa `core/bot_engine.py` para decidir si
+        `KillSwitch.check_position_discrepancy()` tiene sentido: comparar
+        contra un diccionario vacio SIEMPRE por no tener persistencia real
+        dispararia el kill switch en cuanto hubiera cualquier posicion
+        abierta, un falso positivo garantizado -- "no se puede comprobar"
+        y "no hay ninguna posicion" no son lo mismo (mismo principio que
+        `BrokerConnector.get_order_by_client_id`, ver base_connector.py)."""
+
+    @abstractmethod
     def close_trade(
         self,
         trade_id: int,
@@ -98,6 +118,9 @@ class NullTradeStore(TradeStore):
         return None
 
     def get_open_trade_id(self, symbol: str) -> int | None:
+        return None
+
+    def get_expected_open_positions(self) -> dict[str, float] | None:
         return None
 
     def close_trade(self, trade_id, **kwargs) -> None:
@@ -213,6 +236,14 @@ class SqlTradeStore(TradeStore):
             record.exit_order_id = exit_order_id
             record.exit_reason = reason
             record.pnl_pct_of_capital = pnl_pct_of_capital
+
+    def get_expected_open_positions(self) -> dict[str, float]:
+        with session_scope(self._session_factory) as session:
+            records = session.query(TradeRecord).filter(TradeRecord.status == "open").all()
+            positions: dict[str, float] = {}
+            for record in records:
+                positions[record.symbol] = positions.get(record.symbol, 0.0) + record.qty
+            return positions
 
     def record_error(
         self, *, message: str, context: str, symbol: str | None, timestamp: datetime

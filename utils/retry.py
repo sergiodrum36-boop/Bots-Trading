@@ -14,12 +14,12 @@ separado:
     forex -- ver 02_Especificaciones_Tecnicas.md, seccion 1) no tenga
     que reimplementar la misma logica desde cero.
 
-    NOTA DELIBERADA: `AlpacaConnector._call_with_retry` NO se ha tocado
-    para usar este helper en esta misma sesion -- es codigo ya probado
-    en produccion (ver GitHub Actions) y cambiarlo es una decision aparte
-    que conviene confirmar explicitamente antes de tocar un modulo
-    estable, no colar de paso al construir utils/. Migrarlo (o no) queda
-    para una sesion futura.
+    NOTA DELIBERADA (sigue vigente): `AlpacaConnector._call_with_retry`
+    sigue sin usar este helper -- construye su propio `tenacity.Retrying`
+    inline, con la misma politica. Es codigo ya probado en produccion
+    (ver GitHub Actions) y migrarlo a `build_retryer()` es una decision
+    aparte que conviene confirmar explicitamente antes de tocar un
+    modulo estable, no colar de paso. Queda para una sesion futura.
 
   - `CircuitBreaker`: cubre la parte de la seccion 8 que NINGUN modulo
     implementaba todavia: "si varias llamadas consecutivas a la API
@@ -31,9 +31,13 @@ separado:
     (incluso ya con reintentos agotados en cada una), evitando que el
     bot siga golpeando una API caida en cada ciclo del orquestador.
 
-    Tampoco esta conectado automaticamente a nada todavia (ni a
-    core/bot_engine.py ni a los conectores) -- conectarlo es una
-    decision explicita de una sesion futura, igual que build_retryer().
+    CONECTADO (actualizado): `connectors/alpaca_connector.py` ya lo usa
+    dentro de `_call_with_retry` -- cada llamada a la API de Alpaca (tras
+    agotar sus reintentos internos) pasa por
+    `self._circuit_breaker.call(...)`; ver el docstring de ese modulo,
+    seccion "Resiliencia". `core/bot_engine.py` no necesita saber nada de
+    esto: un circuito abierto se le presenta igual que cualquier otro
+    `ConnectorUnavailableError`.
 """
 
 from __future__ import annotations
