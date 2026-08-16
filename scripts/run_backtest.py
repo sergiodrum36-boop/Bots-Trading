@@ -13,12 +13,17 @@ Uso:
     python scripts/run_backtest.py --start 2023-01-01
     python scripts/run_backtest.py --symbols SPY QQQ --start 2023-01-01 --end 2026-01-01
     python scripts/run_backtest.py --start 2023-01-01 --verbose
+
+Los simbolos por defecto y los parametros de la estrategia (EMA/RSI/MACD)
+se leen de `config/config.yaml` (ver `config/settings.py`) -- asi el
+backtest valida la MISMA configuracion que despues usa
+scripts/run_paper_trading.py, no una distinta. `--symbols` en la linea de
+comandos, si se indica, tiene prioridad sobre el archivo.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +31,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backtesting.backtest_runner import BacktestResult, run_backtest  # noqa: E402
-from connectors.alpaca_connector import DEFAULT_SYMBOLS, AlpacaConnector  # noqa: E402
+from config.settings import ConfigValidationError, load_settings  # noqa: E402
+from connectors.alpaca_connector import AlpacaConnector  # noqa: E402
 from connectors.base_connector import ConnectorAuthenticationError, ConnectorError  # noqa: E402
+from utils.logger import DEFAULT_LOG_DIR, setup_logging  # noqa: E402
 
 
 def _parse_date(value: str) -> datetime:
@@ -39,15 +46,15 @@ def _parse_date(value: str) -> datetime:
         ) from exc
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None, default_symbols: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Backtest de la estrategia de tendencia (Fase 0) sobre datos historicos de Alpaca."
     )
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=list(DEFAULT_SYMBOLS),
-        help=f"Simbolos a testear (por defecto: {', '.join(DEFAULT_SYMBOLS)})",
+        default=default_symbols,
+        help=f"Simbolos a testear (por defecto, de config/config.yaml: {', '.join(default_symbols)})",
     )
     parser.add_argument(
         "--start", type=_parse_date, required=True, help="Fecha de inicio, formato AAAA-MM-DD"
@@ -61,7 +68,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Muestra logs INFO del proceso (por defecto solo WARNING/ERROR)",
+        help="Muestra logs INFO por consola (por defecto solo WARNING/ERROR); "
+        "el archivo de log en disco siempre registra INFO, ver --log-dir.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=DEFAULT_LOG_DIR,
+        help=f"Carpeta donde escribir los logs rotados (por defecto: {DEFAULT_LOG_DIR}/)",
     )
     return parser.parse_args(argv)
 
@@ -109,11 +122,19 @@ def print_report(result: BacktestResult) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    try:
+        settings = load_settings()
+    except ConfigValidationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print(
+            "Corrige config/config.yaml (o borralo para volver a los "
+            "valores por defecto) antes de reintentar -- ver config/settings.py.",
+            file=sys.stderr,
+        )
+        return 1
+
+    args = _parse_args(argv, default_symbols=list(settings.symbols))
+    setup_logging(verbose=args.verbose, log_dir=args.log_dir)
 
     try:
         connector = AlpacaConnector(paper=True)
@@ -128,7 +149,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = run_backtest(
-            connector=connector, symbols=args.symbols, start=args.start, end=args.end
+            connector=connector,
+            symbols=args.symbols,
+            start=args.start,
+            end=args.end,
+            strategy_config=settings.to_trend_strategy_config(),
         )
     except ConnectorError as exc:
         print(f"ERROR consultando datos de Alpaca: {exc}", file=sys.stderr)

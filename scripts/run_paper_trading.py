@@ -47,18 +47,23 @@ Uso:
     # local -- tipico al correr desde GitHub Actions, ver
     # .github/workflows/ciclo_diario.yml:
     python scripts/run_paper_trading.py --db-path "$TRADING_BOT_DATABASE_URL"
+
+Los parametros de estrategia, riesgo, stop-loss y kill switch se leen de
+`config/config.yaml` (ver `config/settings.py`) -- si no existe, se usan
+los mismos valores por defecto de siempre. `--symbols` en la linea de
+comandos, si se indica, tiene prioridad sobre el archivo.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from connectors.alpaca_connector import DEFAULT_SYMBOLS, AlpacaConnector  # noqa: E402
+from config.settings import ConfigValidationError, load_settings  # noqa: E402
+from connectors.alpaca_connector import AlpacaConnector  # noqa: E402
 from connectors.base_connector import ConnectorAuthenticationError, ConnectorError  # noqa: E402
 from core.bot_engine import BotEngine, BotEngineConfig, CycleResult  # noqa: E402
 from execution.order_manager import OrderManager  # noqa: E402
@@ -71,10 +76,13 @@ from persistence.database import (  # noqa: E402
 from persistence.kill_switch_store import SqlKillSwitchStateStore  # noqa: E402
 from persistence.store import SqlTradeStore  # noqa: E402
 from risk.kill_switch import DEFAULT_STATE_FILE, KillSwitch  # noqa: E402
-from strategy.trend_strategy import TrendStrategy, TrendStrategyConfig  # noqa: E402
+from strategy.trend_strategy import TrendStrategy  # noqa: E402
+from utils.logger import DEFAULT_LOG_DIR, setup_logging  # noqa: E402
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _parse_args(
+    argv: list[str] | None, default_symbols: list[str]
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Ejecuta UN ciclo de paper trading (Fase 1) contra el sandbox de "
@@ -85,8 +93,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--symbols",
         nargs="+",
-        default=list(DEFAULT_SYMBOLS),
-        help=f"Simbolos a operar (por defecto: {', '.join(DEFAULT_SYMBOLS)})",
+        default=default_symbols,
+        help=f"Simbolos a operar (por defecto, de config/config.yaml: {', '.join(default_symbols)})",
     )
     parser.add_argument(
         "--state-file",
@@ -106,7 +114,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Muestra logs INFO del proceso (por defecto solo WARNING/ERROR)",
+        help="Muestra logs INFO por consola (por defecto solo WARNING/ERROR); "
+        "el archivo de log en disco siempre registra INFO, ver --log-dir.",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=DEFAULT_LOG_DIR,
+        help=f"Carpeta donde escribir los logs rotados (por defecto: {DEFAULT_LOG_DIR}/)",
     )
     return parser.parse_args(argv)
 
@@ -154,11 +168,19 @@ def print_report(result: CycleResult) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    try:
+        settings = load_settings()
+    except ConfigValidationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print(
+            "Corrige config/config.yaml (o borralo para volver a los "
+            "valores por defecto) antes de reintentar -- ver config/settings.py.",
+            file=sys.stderr,
+        )
+        return 1
+
+    args = _parse_args(argv, default_symbols=list(settings.symbols))
+    setup_logging(verbose=args.verbose, log_dir=args.log_dir)
 
     try:
         connector = AlpacaConnector(paper=True)
@@ -172,21 +194,32 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     session_factory = make_session_factory(make_engine(args.db_path))
+    kill_switch_config = settings.to_kill_switch_config()
 
     if is_db_url(args.db_path):
         # Base de datos remota (Postgres/Supabase): el estado del kill
         # switch tambien se guarda ahi (no en --state-file), porque un
         # entorno como GitHub Actions no conserva ningun archivo local
         # entre ejecuciones -- ver persistence/kill_switch_store.py.
-        kill_switch = KillSwitch(store=SqlKillSwitchStateStore(session_factory))
+        kill_switch = KillSwitch(
+            config=kill_switch_config, store=SqlKillSwitchStateStore(session_factory)
+        )
         kill_switch_backend_msg = "base de datos remota (tabla kill_switch_state)"
     else:
-        kill_switch = KillSwitch(state_file=args.state_file)
+        kill_switch = KillSwitch(config=kill_switch_config, state_file=args.state_file)
         kill_switch_backend_msg = f"archivo local ({args.state_file})"
 
-    strategy = TrendStrategy(TrendStrategyConfig())
+    strategy = TrendStrategy(settings.to_trend_strategy_config())
     order_manager = OrderManager(connector=connector, kill_switch=kill_switch)
-    config = BotEngineConfig(symbols=tuple(args.symbols))
+    config = BotEngineConfig(
+        symbols=tuple(args.symbols),
+        timeframe=settings.timeframe,
+        bars_limit=settings.bars_limit,
+        strategy_config=settings.to_trend_strategy_config(),
+        risk_pct=settings.risk.risk_pct,
+        max_position_pct=settings.risk.max_position_pct,
+        stop_loss_config=settings.to_stop_loss_config(),
+    )
     store = SqlTradeStore(session_factory)
     engine = BotEngine(
         connector=connector,

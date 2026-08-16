@@ -1,6 +1,11 @@
 """Smoke tests de scripts/run_backtest.py: verifican que el entry point de
 consola funciona (parseo de argumentos, manejo de credenciales ausentes,
-formato del informe), sin llamar a la API real de Alpaca."""
+formato del informe), sin llamar a la API real de Alpaca.
+
+Todas las invocaciones de `script.main(...)` pasan `--log-dir` apuntando
+a `tmp_path` (via utils/logger.py, ver ese modulo) para no dejar una
+carpeta `logs/` real en el directorio desde el que se ejecuta la suite.
+"""
 
 from __future__ import annotations
 
@@ -27,21 +32,30 @@ def mock_alpaca_clients(monkeypatch):
     return SimpleNamespace(trading=trading_instance, data=data_instance)
 
 
-def test_missing_credentials_exits_with_error(monkeypatch, capsys):
+def test_missing_credentials_exits_with_error(monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 
-    exit_code = script.main(["--start", "2023-01-01"])
+    exit_code = script.main(
+        ["--start", "2023-01-01", "--log-dir", str(tmp_path / "logs")]
+    )
 
     assert exit_code == 1
     captured = capsys.readouterr()
     assert ".env" in captured.err
 
-def test_runs_end_to_end_with_mocked_connector(monkeypatch, capsys, mock_alpaca_clients):
+def test_runs_end_to_end_with_mocked_connector(monkeypatch, capsys, mock_alpaca_clients, tmp_path):
     monkeypatch.setenv("APCA_API_KEY_ID", "test-key")
     monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
 
-    exit_code = script.main(["--symbols", "SPY", "--start", "2023-01-01", "--end", "2023-02-01"])
+    exit_code = script.main(
+        [
+            "--symbols", "SPY",
+            "--start", "2023-01-01",
+            "--end", "2023-02-01",
+            "--log-dir", str(tmp_path / "logs"),
+        ]
+    )
 
     assert exit_code == 0
     captured = capsys.readouterr()
@@ -64,12 +78,17 @@ def test_format_metric_handles_none_explicitly():
     assert "no aplica" in script._format_metric(None)
 
 
-def test_multi_symbol_run_prints_explanatory_notice(monkeypatch, capsys, mock_alpaca_clients):
+def test_multi_symbol_run_prints_explanatory_notice(monkeypatch, capsys, mock_alpaca_clients, tmp_path):
     monkeypatch.setenv("APCA_API_KEY_ID", "test-key")
     monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
 
     exit_code = script.main(
-        ["--symbols", "SPY", "QQQ", "--start", "2023-01-01", "--end", "2023-02-01"]
+        [
+            "--symbols", "SPY", "QQQ",
+            "--start", "2023-01-01",
+            "--end", "2023-02-01",
+            "--log-dir", str(tmp_path / "logs"),
+        ]
     )
 
     assert exit_code == 0

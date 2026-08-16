@@ -10,7 +10,7 @@
 # Estado del kill switch -- local de cada maquina/ejecucion (risk/kill_switch.py).
 kill_switch_state.json
 
-# Logs rotados (utils/logger.py, todavia no construido).
+# Logs rotados (utils/logger.py).
 logs/
 
 # Entorno virtual y cache de Python.

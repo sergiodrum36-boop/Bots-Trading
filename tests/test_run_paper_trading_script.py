@@ -1,7 +1,12 @@
 """Smoke tests de scripts/run_paper_trading.py: verifican que el entry
 point de consola funciona (credenciales ausentes, mercado cerrado, ciclo
 sin datos, kill switch activo), sin llamar a la API real de Alpaca ni
-enviar ninguna orden real."""
+enviar ninguna orden real.
+
+Todas las invocaciones de `script.main(...)` pasan `--log-dir` apuntando
+a `tmp_path` (via utils/logger.py, ver ese modulo) para no dejar una
+carpeta `logs/` real en el directorio desde el que se ejecuta la suite.
+"""
 
 from __future__ import annotations
 
@@ -38,11 +43,11 @@ def _env(monkeypatch):
     monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
 
 
-def test_missing_credentials_exits_with_error(monkeypatch, capsys):
+def test_missing_credentials_exits_with_error(monkeypatch, capsys, tmp_path):
     monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
     monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
 
-    exit_code = script.main([])
+    exit_code = script.main(["--log-dir", str(tmp_path / "logs")])
 
     assert exit_code == 1
     captured = capsys.readouterr()
@@ -60,6 +65,7 @@ def test_market_closed_reports_no_symbols_evaluated(
             "--symbols", "SPY",
             "--state-file", str(tmp_path / "ks.json"),
             "--db-path", str(tmp_path / "audit.sqlite"),
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
@@ -82,6 +88,7 @@ def test_market_open_no_data_reports_hold_per_symbol(
             "--symbols", "SPY", "QQQ",
             "--state-file", str(tmp_path / "ks.json"),
             "--db-path", str(tmp_path / "audit.sqlite"),
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
@@ -107,6 +114,7 @@ def test_kill_switch_state_file_argument_is_used(
             "--symbols", "SPY",
             "--state-file", str(state_file),
             "--db-path", str(tmp_path / "audit.sqlite"),
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
@@ -130,6 +138,7 @@ def test_already_active_kill_switch_blocks_the_whole_cycle(
             "--symbols", "SPY",
             "--state-file", str(state_file),
             "--db-path", str(tmp_path / "audit.sqlite"),
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
@@ -152,6 +161,7 @@ def test_db_path_argument_creates_and_records_to_the_database(
             "--symbols", "SPY",
             "--state-file", str(tmp_path / "ks.json"),
             "--db-path", str(db_path),
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
@@ -188,6 +198,7 @@ def test_db_path_as_url_uses_the_sql_backed_kill_switch(
             "--symbols", "SPY",
             "--state-file", str(unused_state_file),
             "--db-path", db_url,
+            "--log-dir", str(tmp_path / "logs"),
         ]
     )
 
