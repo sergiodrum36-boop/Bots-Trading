@@ -1,0 +1,20 @@
+# Tema visual del panel (Etapa 1 del rediseño "Panel v2" -- ver
+# bot_trading_project.md en la memoria del Project para el contexto
+# completo de la investigacion de diseno).
+#
+# Direccion elegida: fondo oscuro tipo Stripe/Linear/Vercel, un unico
+# color de acento de marca (#5B8DEF, azul indigo) para elementos
+# interactivos, y verde/rojo suavizados para P&L (definidos como CSS en
+# dashboard/app.py, Streamlit no permite configurar esos dos colores desde
+# este archivo). Este archivo cubre la paleta base; dashboard/app.py anade
+# la tipografia (Inter) y el estilo de tarjeta de las metricas KPI.
+[theme]
+base = "dark"
+primaryColor = "#5B8DEF"
+backgroundColor = "#0F1320"
+secondaryBackgroundColor = "#161B2E"
+textColor = "#E5E7EB"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

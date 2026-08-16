@@ -5,6 +5,7 @@ la API real de Alpaca."""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -16,6 +17,25 @@ import connectors.alpaca_connector as ac_module
 
 # Resuelto contra este archivo (tests/), ver AppTest.from_file().
 APP_PATH = "../dashboard/app.py"
+
+
+def _kpi_value(at, label: str) -> str:
+    """Busca la tarjeta KPI (dashboard/app.py, render_kpi_card, Etapa 1
+    del rediseno "Panel v2") cuyo label coincide y devuelve el texto de su
+    valor. Desde el restyling, las metricas de arriba ya no son st.metric
+    sino HTML propio renderizado via st.markdown -- por eso ya no se
+    pueden buscar con `at.metric`, hay que mirar entre los elementos
+    markdown."""
+    pattern = re.compile(
+        rf'<div class="kpi-label">{re.escape(label)}</div>\s*'
+        rf'<div class="kpi-value[^"]*">(.*?)</div>',
+        re.DOTALL,
+    )
+    for md in at.markdown:
+        match = pattern.search(md.value)
+        if match:
+            return match.group(1).strip()
+    raise AssertionError(f"No se encontro la tarjeta KPI con label {label!r}")
 
 
 @pytest.fixture
@@ -59,15 +79,12 @@ def test_app_loads_without_exceptions_with_live_connection(
         "Configuracion",
         "Errores",
     ]
-    # Streamlit ejecuta el contenido de todas las pestanas en cada corrida
-    # (no solo la activa), asi que ademas de las 5 metricas de la fila de
-    # KPIs en vivo (Equity, Cash, Buying power, Mercado, Kill switch)
-    # tambien aparecen las 3 del resumen de "Historial de operaciones".
-    assert len(at.metric) == 8
-    equity_metric = next(m for m in at.metric if m.label == "Equity")
-    assert equity_metric.value == "$100,000.00"
-    mercado_metric = next(m for m in at.metric if m.label == "Mercado")
-    assert mercado_metric.value == "Abierto"
+    # Las metricas KPI (fila en vivo + resumen de "Historial de
+    # operaciones") ya no son st.metric sino tarjetas HTML propias (ver
+    # render_kpi_card en dashboard/app.py, Etapa 1 del rediseno) -- se
+    # comprueban por contenido en vez de por at.metric.
+    assert _kpi_value(at, "Equity") == "$100,000.00"
+    assert _kpi_value(at, "Mercado") == "Abierto"
 
 
 def test_app_degrades_gracefully_without_credentials(monkeypatch, tmp_path):
@@ -82,8 +99,7 @@ def test_app_degrades_gracefully_without_credentials(monkeypatch, tmp_path):
 
     assert not at.exception
     assert len(at.error) >= 1
-    mercado_metric = next(m for m in at.metric if m.label == "Mercado")
-    assert mercado_metric.value == "-"
+    assert _kpi_value(at, "Mercado") == "-"
 
 
 def test_app_shows_historical_data_from_the_database(monkeypatch, mock_alpaca_clients, tmp_path):
@@ -129,8 +145,7 @@ def test_app_uses_sql_backed_kill_switch_when_db_path_is_a_url(
 
     assert not at.exception
     assert at.sidebar.text_input[1].disabled is True
-    kill_switch_metric = next(m for m in at.metric if m.label == "Kill switch")
-    assert kill_switch_metric.value == "\U0001F7E2 Inactivo"
+    assert _kpi_value(at, "Kill switch") == "Inactivo"
 
     from persistence.database import make_engine, make_session_factory
     from persistence.kill_switch_store import SqlKillSwitchStateStore

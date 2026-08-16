@@ -23,3 +23,10 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Artefactos de compilacion del .exe (Panel v2, Etapa 2, ver build_exe.bat)
+# -- se regeneran en cada build, nunca se versionan. El icono SI se versiona
+# (assets/icon.ico), solo se excluye lo que genera PyInstaller.
+build/
+dist/
+*.spec

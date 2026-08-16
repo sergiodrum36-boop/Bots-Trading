@@ -79,3 +79,19 @@ def format_pct(value: float | None, decimals: int = 2) -> str:
 
 def format_optional(value) -> str:
     return "-" if value is None else str(value)
+
+
+def pnl_tone(value: float | None) -> str:
+    """Clasifica un valor de P&L en "positive"/"negative"/"neutral" para
+    que dashboard/app.py elija el color suavizado correspondiente (verde
+    #3FB68B / rojo #E0556B, ver la tarjeta KPI). Vive aqui (sin
+    dependencia de Streamlit) para poder testear la clasificacion con
+    pytest igual que el resto de este modulo -- app.py solo la usa para
+    pintar."""
+    if value is None:
+        return "neutral"
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "neutral"

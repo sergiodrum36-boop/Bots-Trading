@@ -9,9 +9,10 @@ de las especificaciones).
 
 Cómo lanzarlo:
     streamlit run dashboard/app.py
-(o haciendo doble clic en `iniciar_panel.bat`, que activa el entorno
-virtual y ejecuta este mismo comando -- nunca hace falta escribir nada en
-una terminal).
+(o haciendo doble clic en `iniciar_panel_app.vbs`, que lo abre en su
+propia ventana de escritorio sin depender del navegador ni mostrar una
+ventana de cmd -- ver desktop_app.py. `iniciar_panel.bat` se conserva como
+modo de respaldo/depuración: abre el panel en el navegador de siempre).
 
 Decisiones de diseño:
   - Solo lectura + un único control (reset del kill switch). Deliberadamente
@@ -33,10 +34,17 @@ Decisiones de diseño:
   - Toda la lógica no trivial (acceso a datos, formato) vive en
     dashboard/data.py y persistence/queries.py, testables con pytest sin
     Streamlit -- este archivo es una capa fina que solo dibuja.
+  - TEMA VISUAL (Etapa 1 del rediseño "Panel v2", 2026-08-16): paleta base
+    en .streamlit/config.toml (fondo oscuro, acento #5B8DEF), y aquí se
+    inyecta CSS propio (_PANEL_CSS más abajo) para la tipografía (Inter),
+    las tarjetas KPI y el verde/rojo suavizado del P&L -- ver
+    render_kpi_card(). No se tocó nada de la lógica de arriba, solo cómo
+    se dibuja.
 """
 
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 
@@ -45,13 +53,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
-from connectors.alpaca_connector import DEFAULT_SYMBOLS, AlpacaConnector  # noqa: E402
+from config.settings import BotSettings, ConfigValidationError, load_settings  # noqa: E402
+from connectors.alpaca_connector import AlpacaConnector  # noqa: E402
 from connectors.base_connector import ConnectorAuthenticationError  # noqa: E402
 from dashboard.data import (  # noqa: E402
     fetch_live_status,
     format_currency,
     format_optional,
     format_pct,
+    pnl_tone,
     summarize_kill_switch,
 )
 from persistence.database import is_db_url, make_engine, make_session_factory, resolve_db_path  # noqa: E402
@@ -63,11 +73,101 @@ from persistence.queries import (  # noqa: E402
     list_trades,
     summarize_closed_trades,
 )
-from risk.kill_switch import DEFAULT_STATE_FILE, KillSwitch, KillSwitchConfig  # noqa: E402
-from risk.position_sizing import DEFAULT_MAX_POSITION_PCT, DEFAULT_RISK_PCT  # noqa: E402
-from risk.stop_loss import DEFAULT_FIXED_PERCENT  # noqa: E402
+from risk.kill_switch import DEFAULT_STATE_FILE, KillSwitch  # noqa: E402
+from risk.stop_loss import StopLossMethod  # noqa: E402
 
 st.set_page_config(page_title="Bot de Trading -- Panel", page_icon="\U0001F4C8", layout="wide")
+
+# ----------------------------------------------------------------------
+# Tema visual (Etapa 1 del rediseno "Panel v2"): tipografia Inter,
+# tarjetas KPI con estilo propio (para poder colorear el valor del P&L
+# sin depender de la estructura HTML interna de st.metric, que puede
+# cambiar entre versiones de Streamlit), verde/rojo suavizados, y ocultar
+# el menu hamburguesa/barra de herramientas (incluye el boton "Deploy")/
+# pie de pagina de Streamlit -- no aportan nada en un panel de uso
+# personal, y menos aun envuelto en su propia ventana de escritorio (ver
+# desktop_app.py). La paleta base (fondo, acento) viene de
+# .streamlit/config.toml.
+_PANEL_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+#MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden; }
+
+.block-container { padding-top: 2rem; }
+
+.kpi-card {
+    background-color: #161B2E;
+    border: 1px solid #232A44;
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.kpi-label {
+    color: #9CA3AF;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    margin-bottom: 6px;
+}
+
+.kpi-value {
+    font-weight: 700;
+    font-size: 1.6rem;
+    color: #E5E7EB;
+    line-height: 1.3;
+}
+
+.kpi-positive { color: #3FB68B; }
+.kpi-negative { color: #E0556B; }
+.kpi-neutral  { color: #E5E7EB; }
+
+[data-testid="stDataFrame"] {
+    border: 1px solid #232A44;
+    border-radius: 8px;
+    overflow: hidden;
+}
+</style>
+"""
+st.markdown(_PANEL_CSS, unsafe_allow_html=True)
+
+
+def render_kpi_card(container, label: str, value: str, tone: str = "neutral") -> None:
+    """Dibuja una tarjeta KPI (etiqueta + valor grande) con estilo propio
+    en vez de st.metric -- da control total sobre el color del valor
+    (verde/rojo suavizado para P&L y kill switch) sin depender de la
+    estructura HTML interna de st.metric. `container` es una columna o el
+    propio `st` (cualquier objeto con `.markdown()`)."""
+    tone_class = {"positive": "kpi-positive", "negative": "kpi-negative"}.get(tone, "kpi-neutral")
+    container.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{html.escape(label)}</div>
+            <div class="kpi-value {tone_class}">{html.escape(value)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# Config/config.yaml (o los valores por defecto de siempre si no existe o
+# no se puede leer -- ver config/settings.py) alimenta tanto el kill
+# switch como la pestana "Configuracion" mas abajo. Un config.yaml
+# invalido no debe tumbar el panel de consulta entero -- se avisa y se
+# sigue con los valores por defecto, a diferencia de los scripts de
+# ejecucion (run_paper_trading.py/run_backtest.py), que si abortan.
+try:
+    settings = load_settings()
+    settings_error: str | None = None
+except ConfigValidationError as exc:
+    settings = BotSettings()
+    settings_error = str(exc)
 
 # ----------------------------------------------------------------------
 # Barra lateral: de donde leer los datos
@@ -96,6 +196,12 @@ if st.sidebar.button("\U0001F504 Actualizar ahora", use_container_width=True):
 
 st.sidebar.caption(f"Actualizado: {pd.Timestamp.now(tz='UTC').strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
+if settings_error:
+    st.sidebar.error(
+        f"config/config.yaml tiene un problema, se estan usando los "
+        f"valores por defecto: {settings_error}"
+    )
+
 # ----------------------------------------------------------------------
 # Conexion en vivo con Alpaca (paper trading) + estado del kill switch
 # ----------------------------------------------------------------------
@@ -108,13 +214,15 @@ except ConnectorAuthenticationError as exc:
 
 session_factory = make_session_factory(make_engine(db_path))
 
+kill_switch_config = settings.to_kill_switch_config()
+
 if is_db_url(db_path):
     # Misma base de datos remota para el historial y el kill switch -- ver
     # persistence/kill_switch_store.py. El campo "Archivo de estado del
     # kill switch" de la barra lateral se ignora en este caso.
-    kill_switch = KillSwitch(config=KillSwitchConfig(), store=SqlKillSwitchStateStore(session_factory))
+    kill_switch = KillSwitch(config=kill_switch_config, store=SqlKillSwitchStateStore(session_factory))
 else:
-    kill_switch = KillSwitch(config=KillSwitchConfig(), state_file=state_file)
+    kill_switch = KillSwitch(config=kill_switch_config, state_file=state_file)
 kill_switch_summary = summarize_kill_switch(kill_switch)
 
 st.title("Estado del bot")
@@ -135,23 +243,41 @@ else:
         )
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Equity", format_currency(live.account.equity) if live and live.account else "-")
-col2.metric("Cash", format_currency(live.account.cash) if live and live.account else "-")
-col3.metric(
-    "Buying power", format_currency(live.account.buying_power) if live and live.account else "-"
+render_kpi_card(
+    col1, "Equity", format_currency(live.account.equity) if live and live.account else "-"
+)
+render_kpi_card(col2, "Cash", format_currency(live.account.cash) if live and live.account else "-")
+render_kpi_card(
+    col3,
+    "Buying power",
+    format_currency(live.account.buying_power) if live and live.account else "-",
 )
 if live is not None and live.market_open is not None:
     mercado_label = "Abierto" if live.market_open else "Cerrado"
 else:
     mercado_label = "-"
-col4.metric("Mercado", mercado_label)
-col5.metric("Kill switch", "\U0001F534 Activo" if kill_switch_summary.active else "\U0001F7E2 Inactivo")
+render_kpi_card(col4, "Mercado", mercado_label)
+render_kpi_card(
+    col5,
+    "Kill switch",
+    "Activo" if kill_switch_summary.active else "Inactivo",
+    tone="negative" if kill_switch_summary.active else "positive",
+)
 
 # ----------------------------------------------------------------------
 # Kill switch: detalle + reset manual (confirmacion en dos pasos)
 # ----------------------------------------------------------------------
 with st.expander("Detalle del kill switch", expanded=kill_switch_summary.active):
-    st.write(f"**P&L acumulado hoy:** {format_pct(kill_switch_summary.daily_pnl_pct)}")
+    daily_pnl_tone = pnl_tone(kill_switch_summary.daily_pnl_pct)
+    daily_pnl_class = {"positive": "kpi-positive", "negative": "kpi-negative"}.get(
+        daily_pnl_tone, "kpi-neutral"
+    )
+    st.markdown(
+        f"**P&L acumulado hoy:** "
+        f"<span class='{daily_pnl_class}'>"
+        f"{html.escape(format_pct(kill_switch_summary.daily_pnl_pct))}</span>",
+        unsafe_allow_html=True,
+    )
     st.write(f"**Perdidas consecutivas:** {kill_switch_summary.consecutive_losses}")
     st.write(f"**Operaciones hoy:** {kill_switch_summary.trades_today}")
     st.write(f"**Conexion caida ahora mismo:** {'Si' if kill_switch_summary.connection_lost else 'No'}")
@@ -225,11 +351,18 @@ tab_trades, tab_equity, tab_signals, tab_config, tab_errors = st.tabs(
 with tab_trades:
     summary = summarize_closed_trades(session_factory)
     sum_col1, sum_col2, sum_col3 = st.columns(3)
-    sum_col1.metric("Operaciones cerradas", summary["n_trades"])
-    sum_col2.metric(
-        "Win rate", format_pct(summary["win_rate"]) if summary["win_rate"] is not None else "-"
+    render_kpi_card(sum_col1, "Operaciones cerradas", str(summary["n_trades"]))
+    render_kpi_card(
+        sum_col2,
+        "Win rate",
+        format_pct(summary["win_rate"]) if summary["win_rate"] is not None else "-",
     )
-    sum_col3.metric("P&L acumulado", format_pct(summary["total_pnl_pct"]))
+    render_kpi_card(
+        sum_col3,
+        "P&L acumulado",
+        format_pct(summary["total_pnl_pct"]),
+        tone=pnl_tone(summary["total_pnl_pct"]),
+    )
 
     trades = list_trades(session_factory)
     if trades:
@@ -269,7 +402,7 @@ with tab_equity:
         st.caption("Todavia no hay snapshots de capital guardados.")
 
 with tab_signals:
-    symbol_filter = st.selectbox("Filtrar por simbolo", options=["(todos)"] + list(DEFAULT_SYMBOLS))
+    symbol_filter = st.selectbox("Filtrar por simbolo", options=["(todos)"] + list(settings.symbols))
     signals = list_signals(
         session_factory, symbol=None if symbol_filter == "(todos)" else symbol_filter
     )
@@ -297,15 +430,33 @@ with tab_signals:
 
 with tab_config:
     st.caption(
-        "Valores por defecto usados por scripts/run_paper_trading.py -- "
-        "todavia no existe config/config.yaml, asi que esto no se lee de "
-        "un archivo de configuracion: son las constantes actuales del "
-        "codigo."
+        "Valores cargados desde config/config.yaml -- si el archivo no "
+        "existe, se usan los mismos valores por defecto que ya traia "
+        "cada modulo (ver config/settings.py)."
     )
-    st.write(f"**Simbolos por defecto:** {', '.join(DEFAULT_SYMBOLS)}")
-    st.write(f"**Riesgo por operacion:** {format_pct(DEFAULT_RISK_PCT)} del capital")
-    st.write(f"**Maximo por posicion:** {format_pct(DEFAULT_MAX_POSITION_PCT)} del capital")
-    st.write(f"**Stop-loss fijo:** {format_pct(DEFAULT_FIXED_PERCENT)} por debajo del precio de entrada")
+    st.write(f"**Simbolos por defecto:** {', '.join(settings.symbols)}")
+    st.write(f"**Timeframe:** {settings.timeframe.value}")
+    st.write(f"**Riesgo por operacion:** {format_pct(settings.risk.risk_pct)} del capital")
+    st.write(f"**Maximo por posicion:** {format_pct(settings.risk.max_position_pct)} del capital")
+    if settings.stop_loss.method == StopLossMethod.FIXED_PERCENT:
+        st.write(
+            f"**Stop-loss fijo:** {format_pct(settings.stop_loss.fixed_percent)} "
+            f"por debajo del precio de entrada"
+        )
+    else:
+        st.write(f"**Stop-loss ATR:** multiplicador {settings.stop_loss.atr_multiplier}")
+    st.write(
+        f"**Kill switch -- perdida diaria maxima:** "
+        f"{format_pct(settings.kill_switch.max_daily_loss_pct)} del capital"
+    )
+    st.write(
+        f"**Kill switch -- perdidas consecutivas maximas:** "
+        f"{settings.kill_switch.max_consecutive_losses}"
+    )
+    st.write(
+        f"**Kill switch -- operaciones maximas por dia:** "
+        f"{settings.kill_switch.max_trades_per_day}"
+    )
     st.write(f"**Base de datos de auditoria:** `{db_path}`")
     if is_db_url(db_path):
         st.write("**Estado del kill switch:** base de datos remota (tabla `kill_switch_state`)")

@@ -1,5 +1,10 @@
 @echo off
-REM Lanzador del panel visual del bot de trading.
+REM Lanzador del panel visual del bot de trading -- MODO NAVEGADOR/DEPURACION.
+REM Desde la Etapa 1 del rediseno "Panel v2", el lanzador normal del dia a
+REM dia es iniciar_panel_app.vbs (ventana de escritorio propia, sin cmd
+REM visible). Este .bat se conserva para diagnosticar problemas de arranque
+REM con la ventana de cmd (y sus mensajes de error) visibles, o si prefieres
+REM seguir usando el navegador.
 REM Doble clic sobre este archivo -- no hace falta escribir nada en una
 REM terminal. Activa el entorno virtual del proyecto y abre el panel en
 REM el navegador (Streamlit lo abre solo; si no, ve a http://localhost:8501).

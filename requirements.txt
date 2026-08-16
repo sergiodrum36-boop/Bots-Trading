@@ -13,9 +13,22 @@ psycopg2-binary>=2.9
 # Panel visual de solo consulta (dashboard/) -- ver dashboard/app.py
 streamlit>=1.61
 
-# Se iran anadiendo aqui las dependencias de los proximos modulos
-# (config/config.yaml + pydantic-settings, etc.) segun
-# 02_Especificaciones_Tecnicas.md, seccion 13.
+# Panel v2, Etapa 1 (desktop_app.py) -- ventana de escritorio propia para
+# el panel, en vez de depender del navegador. Usa el runtime WebView2 de
+# Windows (preinstalado con Windows 10/11 junto con Edge).
+pywebview>=5.0
+
+# Panel v2, Etapa 2 (tray_app.py) -- icono en la bandeja del sistema y
+# generacion del icono de la app (assets/generate_icon.py). PyInstaller
+# (para compilar el .exe) NO va aqui -- ver requirements-build.txt, es
+# una dependencia solo de compilacion, no de uso normal del panel.
+pystray>=0.19
+Pillow>=10.0
+
+# Configuracion (config/) -- carga y valida config/config.yaml, ver
+# config/settings.py y 02_Especificaciones_Tecnicas.md, seccion 13.
+pydantic-settings>=2.0
+PyYAML>=6.0
 
 # Tests
 pytest>=8.0

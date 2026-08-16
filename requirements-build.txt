@@ -1,0 +1,7 @@
+# Dependencia SOLO para compilar el .exe (Etapa 2 del Panel v2, ver
+# build_exe.bat) -- no hace falta para correr el panel normalmente, ni en
+# modo navegador (iniciar_panel.bat) ni en modo ventana de escritorio sin
+# empaquetar (iniciar_panel_app.vbs / desktop_app.py / tray_app.py). Se
+# instala automaticamente al correr build_exe.bat, no hace falta
+# instalarlo a mano salvo que quieras invocar pyinstaller directamente.
+pyinstaller>=6.0
