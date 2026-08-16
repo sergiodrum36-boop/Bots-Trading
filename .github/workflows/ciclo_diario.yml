@@ -5,7 +5,7 @@ name: Ciclo diario de paper trading
 # para por que el bot esta pensado como "un ciclo, se invoca desde fuera"
 # en vez de un proceso continuo).
 #
-# Requiere 3 Secrets configurados en este repositorio (Settings -> Secrets
+# Requiere Secrets configurados en este repositorio (Settings -> Secrets
 # and variables -> Actions), nunca escritos aqui ni en ningun otro archivo:
 #   - APCA_API_KEY_ID / APCA_API_SECRET_KEY: claves de PAPER TRADING de
 #     Alpaca (nunca las de cuenta real).
@@ -14,6 +14,13 @@ name: Ciclo diario de paper trading
 #     cortas como esta, no el connection string "directo"). Sin esto, cada
 #     ejecucion perderia el estado del kill switch y el historial al
 #     terminar el runner -- ver persistence/kill_switch_store.py.
+#   - TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (OPCIONAL): si se configuran,
+#     este ciclo tambien avisa por Telegram cuando el kill switch se activa,
+#     el ciclo se aborta por un fallo de conexion, o algun simbolo tiene un
+#     error -- ver notifications/notifier.py. Sin ellos, el comportamiento
+#     es identico a antes (no bloqueante). Deliberadamente NO se pasa
+#     --notify-summary aqui (decision del usuario, 2026-08-16): solo avisos
+#     criticos, sin un mensaje diario de puro tramite.
 
 on:
   schedule:
@@ -52,4 +59,6 @@ jobs:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
           TRADING_BOT_DATABASE_URL: ${{ secrets.TRADING_BOT_DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/run_paper_trading.py --verbose

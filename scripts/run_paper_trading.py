@@ -52,6 +52,17 @@ Los parametros de estrategia, riesgo, stop-loss y kill switch se leen de
 `config/config.yaml` (ver `config/settings.py`) -- si no existe, se usan
 los mismos valores por defecto de siempre. `--symbols` en la linea de
 comandos, si se indica, tiene prioridad sobre el archivo.
+
+NOTIFICACIONES (notifications/notifier.py, seccion 10 de las
+especificaciones): si `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` estan
+configurados en `.env`, este script avisa por Telegram cuando: (a) el
+ciclo se aborta por un fallo de conexion, (b) el kill switch se activa
+DURANTE este ciclo (no se reavisa cada dia mientras siga activo -- solo
+la primera vez), o (c) algun simbolo tuvo un error no controlado. El
+resumen diario de operativa es opcional, vease `--notify-summary`. Sin
+esas variables configuradas, el comportamiento es exactamente el mismo
+que antes de que existiera este modulo (no bloqueante, ver
+notifications/notifier.py).
 """
 
 from __future__ import annotations
@@ -73,6 +84,7 @@ from persistence.database import (  # noqa: E402
     make_session_factory,
     resolve_db_path,
 )
+from notifications.notifier import Notifier, get_notifier  # noqa: E402
 from persistence.kill_switch_store import SqlKillSwitchStateStore  # noqa: E402
 from persistence.store import SqlTradeStore  # noqa: E402
 from risk.kill_switch import DEFAULT_STATE_FILE, KillSwitch  # noqa: E402
@@ -122,7 +134,70 @@ def _parse_args(
         default=DEFAULT_LOG_DIR,
         help=f"Carpeta donde escribir los logs rotados (por defecto: {DEFAULT_LOG_DIR}/)",
     )
+    parser.add_argument(
+        "--notify-summary",
+        action="store_true",
+        help=(
+            "Ademas de los avisos criticos (kill switch, errores, conexion "
+            "caida), envia tambien un resumen del ciclo por Telegram aunque "
+            "no haya pasado nada destacable -- por defecto solo se avisa de "
+            "lo critico, para no generar un mensaje diario de puro tramite."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _format_symbol_line(symbol_result) -> str:
+    line = f"{symbol_result.symbol}: {symbol_result.action.value}"
+    if symbol_result.executed:
+        line += " (ejecutado)"
+    return line
+
+
+def send_notifications(
+    notifier: Notifier,
+    result: CycleResult,
+    kill_switch: KillSwitch,
+    kill_switch_was_active_before: bool,
+    notify_summary: bool,
+) -> None:
+    """Envia los avisos criticos que correspondan segun `result`
+    (ver el docstring del modulo). Un fallo de `notifier.notify(...)`
+    nunca llega aqui como excepcion (ver notifications/notifier.py) --
+    esta funcion tampoco lanza nada por su cuenta, para no poder tumbar
+    el ciclo de trading por un problema de notificaciones."""
+    if result.aborted:
+        notifier.notify(
+            f"⚠️ Bot de Trading: ciclo abortado -- {result.abort_reason}"
+        )
+
+    # Solo se avisa la PRIMERA vez que se dispara (no cada dia que sigue
+    # activo esperando un reset() manual) -- comparar el estado ANTES vs
+    # DESPUES de este ciclo evita repetir el mismo aviso indefinidamente.
+    if not kill_switch_was_active_before and result.kill_switch_active:
+        notifier.notify(
+            f"🛑 Bot de Trading: KILL SWITCH ACTIVADO -- "
+            f"{kill_switch.state.trigger_reason}. Requiere reset() manual "
+            f"para reanudar."
+        )
+
+    symbol_errors = [sr for sr in result.symbol_results if sr.error is not None]
+    if symbol_errors:
+        detalle = "; ".join(f"{sr.symbol}: {sr.error}" for sr in symbol_errors)
+        notifier.notify(f"⚠️ Bot de Trading: errores en el ciclo -- {detalle}")
+
+    if notify_summary:
+        if result.aborted:
+            resumen = f"ciclo abortado ({result.abort_reason})"
+        elif not result.symbol_results:
+            resumen = (
+                "kill switch activo, ningun simbolo evaluado"
+                if result.kill_switch_active
+                else "mercado cerrado, ningun simbolo evaluado"
+            )
+        else:
+            resumen = "; ".join(_format_symbol_line(sr) for sr in result.symbol_results)
+        notifier.notify(f"📋 Bot de Trading: resumen del ciclo -- {resumen}")
 
 
 def print_report(result: CycleResult) -> None:
@@ -209,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
         kill_switch = KillSwitch(config=kill_switch_config, state_file=args.state_file)
         kill_switch_backend_msg = f"archivo local ({args.state_file})"
 
+    # Estado ANTES del ciclo, para poder distinguir "se acaba de disparar
+    # ahora" de "sigue disparado desde hace dias" -- ver send_notifications().
+    kill_switch_was_active_before = kill_switch.is_active()
+    notifier = get_notifier()
+
     strategy = TrendStrategy(settings.to_trend_strategy_config())
     order_manager = OrderManager(connector=connector, kill_switch=kill_switch)
     config = BotEngineConfig(
@@ -241,9 +321,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = engine.run_cycle()
     except ConnectorError as exc:
+        notifier.notify(f"⚠️ Bot de Trading: fallo no controlado consultando Alpaca -- {exc}")
         print(f"ERROR consultando Alpaca: {exc}", file=sys.stderr)
         return 1
 
+    send_notifications(
+        notifier, result, kill_switch, kill_switch_was_active_before, args.notify_summary
+    )
     print_report(result)
     return 0
 
