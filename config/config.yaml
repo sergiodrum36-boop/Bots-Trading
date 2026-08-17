@@ -22,11 +22,28 @@
 # Simbolos que evalua el bot en cada ciclo de paper trading o backtest.
 # Se puede sobreescribir puntualmente con --symbols en los scripts sin
 # tocar este archivo.
+#
+# Ampliado el 2026-08-17 de 4 a 7 simbolos, tras comparar en backtest
+# (2018-01-01 -> hoy, python scripts/run_backtest.py --symbols ...):
+#   - Se añadieron GLD (oro), SLV (plata) e IWM (small caps) para dar
+#     diversidad real de comportamiento, no solo mas acciones tecnologicas.
+#   - Se probo tambien TLT (bonos largo plazo) y se descarto: con esta
+#     estrategia de cruce de medias perdia dinero de forma clara
+#     (profit_factor 0.21, total_return_pct -20%) -- diluia el resultado
+#     conjunto en vez de aportar. Ver el aviso del propio backtest sobre
+#     total_return_pct/max_drawdown por simbolo vs. globales antes de
+#     tocar esta lista otra vez.
+#   - Con los 7 simbolos de abajo: 91 operaciones, win_rate 40.66%,
+#     profit_factor 2.0893 -- mejor que con los 4 originales o con los 8
+#     (incluyendo TLT).
 symbols:
   - SPY
   - QQQ
   - AAPL
   - MSFT
+  - GLD
+  - SLV
+  - IWM
 
 # Timeframe de las velas: "1Min", "5Min", "15Min", "1Hour" o "1Day".
 # La estrategia de la Fase 1 esta pensada para velas diarias (ver
