@@ -182,6 +182,42 @@ class TestBars:
         assert len(bars) == 3
         assert bars[-1].timestamp == datetime(2026, 8, 5, tzinfo=timezone.utc)
 
+    def test_get_recent_bars_does_not_pass_limit_to_alpaca(self, connector, mock_clients):
+        """Regresion del bug detectado el 17/08/2026: la API de bars de
+        Alpaca devuelve las velas en orden ASCENDENTE dentro de
+        [start, end] y trunca en cuanto alcanza `limit` -- con la ventana
+        amplia que usa `get_recent_bars` (necesaria para cubrir fines de
+        semana/festivos), pasar `limit` a Alpaca hacia que devolviera las
+        velas MAS ANTIGUAS del rango, no las mas recientes. El ciclo de
+        paper trading en vivo llego a operar con velas de hace ~6 meses
+        sin ningun error visible. `get_recent_bars` debe pedir el rango
+        COMPLETO a Alpaca (limit=None en la peticion) y recortar el mismo,
+        en Python, las ultimas N velas -- ver connectors/alpaca_connector.py.
+        """
+        bars_raw = [
+            _make_bar(
+                datetime(2026, 1, day, tzinfo=timezone.utc),
+                100 + day, 101 + day, 99 + day, 100.5 + day,
+            )
+            for day in range(1, 32)  # 31 velas "disponibles" en el rango simulado
+        ]
+        bar_set = SimpleNamespace(data={"AAPL": bars_raw})
+        mock_clients.data.get_stock_bars.return_value = bar_set
+
+        bars = connector.get_recent_bars("AAPL", timeframe=Timeframe.DAY, limit=5)
+
+        # La peticion real enviada a Alpaca no debe llevar un `limit` que
+        # trunque la respuesta desde el principio del rango.
+        request_sent = mock_clients.data.get_stock_bars.call_args[0][0]
+        assert request_sent.limit is None
+
+        # Y las 5 velas devueltas deben ser las MAS RECIENTES del rango
+        # completo (27-31 de enero), no las 5 primeras (1-5 de enero) --
+        # el recorte real ocurre en Python, sobre los datos completos.
+        assert len(bars) == 5
+        assert bars[0].timestamp == datetime(2026, 1, 27, tzinfo=timezone.utc)
+        assert bars[-1].timestamp == datetime(2026, 1, 31, tzinfo=timezone.utc)
+
     def test_get_latest_bar_returns_single_normalized_bar(
         self, connector, mock_clients
     ):

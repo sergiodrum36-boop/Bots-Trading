@@ -401,8 +401,26 @@ class AlpacaConnector(BrokerConnector):
     ) -> list[OHLCVBar]:
         end = datetime.now(timezone.utc)
         start = end - _lookback_window(timeframe, limit)
+        # BUG corregido el 17/08/2026 -- NO se pasa `limit` a Alpaca aqui a
+        # proposito. La API de bars de Alpaca devuelve las velas en orden
+        # ASCENDENTE (las mas antiguas del rango [start, end] primero) y,
+        # si se le pasa `limit`, trunca la respuesta en cuanto lo alcanza
+        # -- es decir, con una ventana amplia (necesaria para cubrir fines
+        # de semana/festivos, ver `_lookback_window`) y `limit=100`,
+        # Alpaca devolvia las 100 velas MAS ANTIGUAS del rango, no las mas
+        # recientes. Esto hizo que el ciclo de paper trading en vivo
+        # operara con velas de hace ~6 meses sin ningun error visible (se
+        # detecto comparando el precio de SPY guardado por el bot contra
+        # el precio real de mercado). Al no pasar `limit` aqui, se trae
+        # TODO el rango [start, end] (paginado por el propio SDK,
+        # segundos, no minutos, para esta ventana de unos pocos meses) y
+        # es el `bars[-limit:]` de abajo -- ejecutado en Python, sobre
+        # datos ya completos -- el que de verdad decide "las ultimas N
+        # velas". `get_historical_bars` (usado por el backtest) no se ve
+        # afectado por este bug porque backtesting/backtest_runner.py
+        # nunca le pasa `limit`.
         bars = self.get_historical_bars(
-            symbols=symbol, timeframe=timeframe, start=start, end=end, limit=limit
+            symbols=symbol, timeframe=timeframe, start=start, end=end, limit=None
         )
         return bars[-limit:]
 
