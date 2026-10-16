@@ -19,6 +19,8 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from agente_explorador import SYSTEM_PROMPT, construir_tarea, extraer_json
+
 SUPABASE_URL = "https://otokpuowhkpgldfuvgge.supabase.co"
 SUPABASE_PUBLISHABLE_KEY = "sb_publishable_wjzABwsd3VLNIDjjkd89hg_QLhyQBoF"
 
@@ -100,6 +102,35 @@ class PeticionPrueba(BaseModel):
     pregunta: str = "Responde en una frase: ¿qué es KDP Intelligence?"
 
 
+class PeticionExplorar(BaseModel):
+    # Valores pequeños a propósito: primera prueba real, barata (ver docs/decisiones.md).
+    # El modo "candidatos" completo pide 40-60 y hasta 1 búsqueda por candidato.
+    num_candidatos: int = 5
+    max_busquedas: int = 5
+
+
+def _ejecutar_explorar(job_id: str, user_id: str, num_candidatos: int, max_busquedas: int) -> None:
+    try:
+        cliente = Anthropic(api_key=_clave_anthropic())
+        respuesta = cliente.messages.create(
+            model="claude-sonnet-5-5",
+            max_tokens=16000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": construir_tarea(num_candidatos, max_busquedas)}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": max_busquedas}],
+        )
+        texto_final = "".join(b.text for b in respuesta.content if b.type == "text")
+        candidatos = extraer_json(texto_final)
+        busquedas_reales = respuesta.usage.server_tool_use.web_search_requests if respuesta.usage.server_tool_use else 0
+        _escribir_job(
+            job_id, user_id, estado="completado",
+            salida={"candidatos": candidatos, "busquedas_usadas": busquedas_reales},
+            actualizado_en="now()",
+        )
+    except Exception as e:  # noqa: BLE001
+        _escribir_job(job_id, user_id, estado="error", error=str(e), actualizado_en="now()")
+
+
 @app.get("/salud")
 def salud():
     return {"ok": True}
@@ -115,4 +146,20 @@ def crear_prueba(
     user_id = _usuario_desde_token(token)
     job_id = _escribir_job(None, user_id, tipo="prueba", estado="corriendo", entrada={"pregunta": peticion.pregunta})
     background_tasks.add_task(_ejecutar_prueba, job_id, user_id, peticion.pregunta)
+    return {"job_id": job_id}
+
+
+@app.post("/explorar")
+def crear_exploracion(
+    peticion: PeticionExplorar,
+    background_tasks: BackgroundTasks,
+    authorization: str = Header(...),
+):
+    token = authorization.removeprefix("Bearer ").strip()
+    user_id = _usuario_desde_token(token)
+    job_id = _escribir_job(
+        None, user_id, tipo="explorar_segmentos", estado="corriendo",
+        entrada={"num_candidatos": peticion.num_candidatos, "max_busquedas": peticion.max_busquedas},
+    )
+    background_tasks.add_task(_ejecutar_explorar, job_id, user_id, peticion.num_candidatos, peticion.max_busquedas)
     return {"job_id": job_id}
